@@ -1,0 +1,139 @@
+syntax = "proto3";
+
+package noxy.device;
+
+option java_multiple_files = true;
+option java_package = "noxy.device";
+option java_outer_classname = "DeviceProto";
+
+service DeviceService {
+  rpc HandleMessage (stream DeviceRequest) returns (stream DeviceResponse);
+}
+
+message DeviceRequest {
+  string request_id = 1;
+  string app_id = 2;
+  optional string device_id = 3;
+  uint64 timestamp = 4;
+  bytes nonce = 5; // 12 bytes
+  optional string session_id = 6;
+  oneof payload {
+    Authenticate authenticate = 7;
+    RegisterDevice register_device = 8;
+    SubscribeNotifications subscribe_notifications = 9;
+    RevokeDevice revoke_device = 10;
+    RotateDeviceKeys rotate_device_keys = 11;
+    ClientAck client_ack = 12;
+  }
+}
+
+message Authenticate {
+  DevicePublicKeys device_pubkeys = 1;
+}
+
+message RegisterDevice {
+  DevicePublicKeys device_pubkeys = 1;
+  string wallet_address = 2;
+  bytes signature = 3;
+}
+
+message DevicePublicKeys {
+  bytes public_key = 1;
+  bytes pq_public_key = 2;
+}
+
+message SubscribeNotifications {
+  optional bool subscribe = 1;  // true or omitted = subscribe, false = unsubscribe
+}
+
+message RevokeDevice {
+  string wallet_address = 1;
+  bytes signature = 2;
+}
+
+message RotateDeviceKeys {
+  DevicePublicKeys new_pubkeys = 1;
+  string wallet_address = 2;
+  bytes signature = 3;
+}
+
+message ClientAck {
+  string message_id = 1;
+  uint64 received_at = 2;
+}
+
+message DeviceResponse {
+  string request_id = 1;
+  optional string message_id = 2;
+  ResponseStatus status = 3;
+  uint64 timestamp = 4;
+  oneof payload {
+    AuthenticateResponse authenticate = 5;
+    RegisterDeviceResponse register_device = 6;
+    SubscribeNotificationsResponse subscribe_notifications = 7;
+    RevokeDeviceResponse revoke_device = 8;
+    RotateDeviceKeysResponse rotate_device_keys = 9;
+    ClientAckResponse client_ack = 10;
+    PushEvent push_event = 11;
+    ErrorResponse error = 12;
+  }
+}
+
+message PushEvent {
+  bytes kyber_ct = 1;
+  bytes nonce = 2;
+  bytes ciphertext = 3;
+}
+
+enum ResponseStatus {
+  OK = 0;
+  ERROR = 1;
+}
+
+message AuthenticateResponse {
+  optional string device_id = 1;
+  bool requires_registration = 2;
+  optional string session_id = 3;
+}
+
+message RegisterDeviceResponse {
+  string device_id = 1;
+  uint64 registered_at = 2;
+  string session_id = 3;
+}
+
+message SubscribeNotificationsResponse {
+  bool subscribed = 1;
+}
+
+message RevokeDeviceResponse {
+  string revoked_device_id = 1;
+}
+
+message RotateDeviceKeysResponse {
+  uint64 rotated_at = 1;
+}
+
+message ClientAckResponse {
+  string acked_message_id = 1;
+}
+
+message ErrorResponse {
+  ErrorCode code = 1;
+  string message = 2;
+  bool retryable = 3;
+}
+
+enum ErrorCode {
+  UNAUTHORIZED = 0;
+  INVALID_SIGNATURE = 1;
+  INVALID_NONCE = 2;
+  REPLAY_DETECTED = 3;
+  DEVICE_NOT_FOUND = 4;
+  DEVICE_REVOKED = 5;
+  APP_NOT_FOUND = 6;
+  APP_QUOTA_EXCEEDED = 7;
+  RATE_LIMITED = 8;
+  INVALID_REQUEST = 9;
+  INTERNAL_ERROR = 10;
+}

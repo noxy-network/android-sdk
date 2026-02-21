@@ -1,0 +1,3 @@
+-keep class network.noxy.sdk.** { *; }
+-keep class noxy.device.** { *; }
+-dontwarn io.grpc.**
