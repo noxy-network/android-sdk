@@ -16,4 +16,3 @@ dependencyResolutionManagement {
 
 rootProject.name = "noxy-android-sdk"
 include(":noxy-sdk")
-include(":examples:app")

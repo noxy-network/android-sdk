@@ -250,35 +250,6 @@ The network layer uses gRPC with generated client from `noxy.device.proto`. Prot
 
 ---
 
-## Publishing
-
-The SDK is published to Maven Central as `network.noxy:android-sdk`.
-
-**Version:** Set in `gradle.properties` as `NOXY_SDK_VERSION` (default: 1.0.0).
-
-**Publish to local Maven** (to verify before publishing to Maven Central):
-
-```bash
-./gradlew :noxy-sdk:publishToMavenLocal
-```
-
-Then in a consumer project, add `mavenLocal()` to repositories and `implementation("network.noxy:android-sdk:1.0.0")` to verify the artifact resolves.
-
-**Publish to Maven Central** (requires Sonatype credentials and GPG signing):
-
-```bash
-./gradlew :noxy-sdk:publishReleasePublicationToMavenCentral \
-  -PSONATYPE_USERNAME=your-username \
-  -PSONATYPE_PASSWORD=your-token \
-  -PSIGNING_KEY_ID=your-key-id \
-  -PSIGNING_KEY=base64-private-key \
-  -PSIGNING_PASSWORD=key-passphrase
-```
-
-**CI/CD:** The `.github/workflows/publish.yml` workflow publishes on release. Configure these secrets: `SONATYPE_USERNAME`, `SONATYPE_PASSWORD`, `SIGNING_KEY_ID`, `SIGNING_KEY`, `SIGNING_PASSWORD`.
-
----
-
 ## License
 
 MIT © Noxy Network
