@@ -1,6 +1,5 @@
 package network.noxy.sdk
 
-import android.content.Context
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import network.noxy.sdk.device.NoxyDeviceModule
@@ -13,6 +12,9 @@ import network.noxy.sdk.storage.NoxyStorage
 
 /**
  * Main Noxy client. Lightweight orchestrator.
+ *
+ * When [NoxyNetworkOptions.fcmToken] or [setFcmToken] is set: online + offline (FCM wake-up).
+ * When not set: online only.
  */
 class NoxyClient(
     private val identity: NoxyIdentity,
@@ -23,10 +25,27 @@ class NoxyClient(
     private val networkModule = NoxyNetworkModule(networkOptions)
     private val notificationModule = NoxyNotificationModule(deviceModule)
 
+    @Volatile
+    private var fcmToken: String? = null
+
+    @Volatile
+    private var notificationHandler: ((Map<String, Any?>) -> Unit)? = null
+
+    private val effectiveFcmToken: String?
+        get() = fcmToken?.takeIf { it.isNotEmpty() } ?: networkOptions.fcmToken
+
     val address: WalletAddress get() = identity.address
     val isDeviceActive: Boolean get() = deviceModule.isRevoked != true
     val isRelayConnected: Boolean get() = networkModule.isConnected
     val isNetworkReady: Boolean get() = networkModule.isReady
+
+    /**
+     * Register FCM token for wake-up pushes when app is backgrounded.
+     * Call when FirebaseMessaging.getInstance().token addsOnCompleteListener fires.
+     */
+    fun setFcmToken(token: String?) {
+        fcmToken = token
+    }
 
     /**
      * Initialize: load or create device, connect to network, authenticate.
@@ -55,7 +74,8 @@ class NoxyClient(
             networkModule.announceDevice(
                 devicePubkeys = dev.publicKey to dev.pqPublicKey,
                 walletAddress = dev.identityId,
-                signature = sig
+                signature = sig,
+                fcmToken = effectiveFcmToken
             )
         }
     }
@@ -90,16 +110,73 @@ class NoxyClient(
      * Subscribe to notifications. Loads device private keys first.
      */
     suspend fun on(handler: (Map<String, Any?>) -> Unit) = withContext(Dispatchers.IO) {
+        notificationHandler = handler
         deviceModule.loadDevicePrivateKeys()
-        networkModule.subscribeToNotifications { envelope ->
-            try {
-                val decrypted = notificationModule.decryptNotification(envelope)
-                if (decrypted != null) {
-                    handler(decrypted)
+        networkModule.subscribeToNotifications(
+            fcmToken = effectiveFcmToken,
+            handler = { envelope ->
+                try {
+                    val decrypted = notificationModule.decryptNotification(envelope)
+                    if (decrypted != null) {
+                        handler(decrypted)
+                    }
+                } catch (_: Exception) {
+                    // Decryption failed; silently ignored
                 }
-            } catch (_: Exception) {
-                // Decryption failed; silently ignored
             }
+        )
+    }
+
+    /**
+     * Check if FCM data payload is a Noxy wake-up.
+     * Relay sends data with `noxy: "wake"` in the data map.
+     */
+    companion object {
+        @JvmStatic
+        fun isNoxyWakeUp(data: Map<String, String>?): Boolean {
+            if (data == null) return false
+            return data["noxy"] == "wake"
+        }
+    }
+
+    /**
+     * Handle FCM wake-up: reconnect to relay and fetch notifications.
+     * Call from FirebaseMessagingService.onMessageReceived when a data message indicates
+     * a Noxy wake (e.g. noxy: "wake" in data).
+     * If [data] is provided, only proceeds when it matches relay wake format.
+     */
+    suspend fun handleWakeUpNotification(data: Map<String, String>? = null): NoxyWakeUpResult =
+        withContext(Dispatchers.IO) {
+            if (data != null && !isNoxyWakeUp(data)) return@withContext NoxyWakeUpResult.NoData
+            performWakeUpFetch()
+        }
+
+    private suspend fun performWakeUpFetch(): NoxyWakeUpResult {
+        val handler = notificationHandler ?: return NoxyWakeUpResult.NoData
+
+        networkModule.disconnect()
+        val device = deviceModule.load(identity.address, networkOptions.appId)
+            ?: return NoxyWakeUpResult.NoData
+        if (device.isRevoked == true) return NoxyWakeUpResult.NoData
+
+        deviceModule.loadDevicePrivateKeys()
+
+        return try {
+            networkModule.connect()
+            networkModule.authenticateDevice(device)
+            networkModule.subscribeToNotifications(
+                fcmToken = effectiveFcmToken,
+                handler = { envelope ->
+                    try {
+                        val decrypted = notificationModule.decryptNotification(envelope)
+                        if (decrypted != null) handler(decrypted)
+                    } catch (_: Exception) {}
+                }
+            )
+            kotlinx.coroutines.delay(20_000)
+            NoxyWakeUpResult.NewData
+        } catch (_: Exception) {
+            NoxyWakeUpResult.Failed
         }
     }
 
@@ -109,4 +186,11 @@ class NoxyClient(
     suspend fun close() = withContext(Dispatchers.IO) {
         networkModule.disconnect()
     }
+}
+
+/** Result for FCM wake-up fetch. Map to result code when reporting to Firebase. */
+enum class NoxyWakeUpResult {
+    NewData,
+    NoData,
+    Failed
 }

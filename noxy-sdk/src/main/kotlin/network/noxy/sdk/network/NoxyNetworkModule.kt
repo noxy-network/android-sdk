@@ -51,26 +51,21 @@ class NoxyNetworkModule(
     val currentSessionId: String? get() = sessionId
     val currentDeviceId: String? get() = networkDeviceId
 
-    private fun parseRelayURL(urlString: String): Triple<String, Int, Boolean> {
+    private fun parseRelayURL(urlString: String): Pair<String, Int> {
         val url = URL(urlString)
         val host = url.host ?: throw NoxyError.General("Invalid relay URL: $urlString")
-        val port = url.port.takeIf { it > 0 } ?: when (url.protocol.lowercase()) {
-            "https" -> 443
-            else -> 50051
+        if (url.protocol.lowercase() != "https") {
+            throw NoxyError.General("Relay URL must use HTTPS")
         }
-        val useTLS = url.protocol.lowercase() == "https"
-        return Triple(host, port, useTLS)
+        val port = url.port.takeIf { it > 0 } ?: 443
+        return host to port
     }
 
     suspend fun connect() = withContext(Dispatchers.IO) {
-        val (host, port, useTLS) = parseRelayURL(options.relayUrl)
+        val (host, port) = parseRelayURL(options.relayUrl)
 
         val builder = OkHttpChannelBuilder.forAddress(host, port)
-        if (useTLS) {
-            builder.useTransportSecurity()
-        } else {
-            builder.usePlaintext()
-        }
+            .useTransportSecurity()
 
         channel = builder.build()
         val stub = DeviceServiceGrpc.newStub(channel).withWaitForReady()
@@ -217,19 +212,22 @@ class NoxyNetworkModule(
     suspend fun announceDevice(
         devicePubkeys: Pair<ByteArray, ByteArray>,
         walletAddress: WalletAddress,
-        signature: ByteArray
+        signature: ByteArray,
+        fcmToken: String? = null
     ) = withContext(Dispatchers.IO) {
-        val req = DeviceRequest.newBuilder()
-            .setRegisterDevice(
-                noxy.device.RegisterDevice.newBuilder()
-                    .setDevicePubkeys(
-                        noxy.device.DevicePublicKeys.newBuilder()
-                            .setPublicKey(com.google.protobuf.ByteString.copyFrom(devicePubkeys.first))
-                            .setPqPublicKey(com.google.protobuf.ByteString.copyFrom(devicePubkeys.second))
-                    )
-                    .setWalletAddress(walletAddress)
-                    .setSignature(com.google.protobuf.ByteString.copyFrom(signature))
+        val regBuilder = noxy.device.RegisterDevice.newBuilder()
+            .setDevicePubkeys(
+                noxy.device.DevicePublicKeys.newBuilder()
+                    .setPublicKey(com.google.protobuf.ByteString.copyFrom(devicePubkeys.first))
+                    .setPqPublicKey(com.google.protobuf.ByteString.copyFrom(devicePubkeys.second))
             )
+            .setWalletAddress(walletAddress)
+            .setSignature(com.google.protobuf.ByteString.copyFrom(signature))
+            .setType("android")
+        if (!fcmToken.isNullOrEmpty()) regBuilder.setFcmToken(fcmToken)
+
+        val req = DeviceRequest.newBuilder()
+            .setRegisterDevice(regBuilder)
             .build()
 
         val resp = sendAndWait(req)
@@ -285,14 +283,16 @@ class NoxyNetworkModule(
      * Subscribe to notifications stream
      */
     suspend fun subscribeToNotifications(
-        handler: suspend (NoxyEncryptedNotification) -> Unit
+        handler: suspend (NoxyEncryptedNotification) -> Unit,
+        fcmToken: String? = null
     ) = withContext(Dispatchers.IO) {
         pushHandler = handler
 
+        val subBuilder = noxy.device.SubscribeNotifications.newBuilder().setSubscribe(true)
+        if (!fcmToken.isNullOrEmpty()) subBuilder.setFcmToken(fcmToken)
+
         val reqBuilder = DeviceRequest.newBuilder()
-            .setSubscribeNotifications(
-                noxy.device.SubscribeNotifications.newBuilder().setSubscribe(true)
-            )
+            .setSubscribeNotifications(subBuilder)
         currentDeviceId?.let { reqBuilder.setDeviceId(it) }
         currentSessionId?.let { reqBuilder.setSessionId(it) }
 

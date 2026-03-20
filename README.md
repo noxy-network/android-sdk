@@ -1,4 +1,4 @@
-# Noxy Android SDK
+# 📦 @noxy-network/android-sdk
 
 **Noxy** is a decentralized push notification network for Web3 apps. This SDK lets your Android app receive secure, end-to-end encrypted notifications using **wallet-based identity** — no emails or phone numbers.
 
@@ -18,6 +18,7 @@ Users register a device once with a wallet signature. After that, they receive r
 
 ## Requirements
 
+- **Java 21** — Gradle and tooling require Java 21. If you have a newer JDK (e.g. 25), set `JAVA_HOME` to Java 21 before building.
 - Android 7.0+ (API 24+)
 - Kotlin 1.9+
 - Coroutines
@@ -29,6 +30,10 @@ Users register a device once with a wallet signature. After that, they receive r
 Add to your app's `build.gradle.kts`:
 
 ```kotlin
+repositories {
+    mavenCentral()
+}
+
 dependencies {
     implementation("network.noxy:android-sdk:1.0.0")
 }
@@ -64,15 +69,19 @@ val identity = NoxyIdentity.Eoa(NoxyEoaWalletIdentity(
     }
 ))
 
-// 2. Create client
+// 2. Create client (optionally with fcmToken for offline wake-up)
 val client = createNoxyClient(
     context = context,
     identity = identity,
     network = NoxyNetworkOptions(
         appId = "your-app-id",
-        relayUrl = "https://relay.noxy.network"
+        relayUrl = "https://relay.noxy.network",
+        fcmToken = fcmToken  // optional: enables wake-up when app is backgrounded
     )
 )
+
+// Or set FCM token later when Firebase returns it
+client.setFcmToken(firebaseToken)
 
 // 3. Initialize (loads or registers device, connects to relay)
 lifecycleScope.launch {
@@ -186,12 +195,41 @@ lifecycleScope.launch {
 
 ---
 
+## FCM & Offline Wake-Up
+
+With `fcmToken` set (via `NoxyNetworkOptions` or `setFcmToken()`), the relay can send wake-up data messages when the app is backgrounded. Your app can then reconnect and fetch new notifications.
+
+**Without FCM token:** Online-only — notifications arrive while the app has an active gRPC connection.
+
+**With FCM token:** Online + offline — relay sends FCM data messages with `data["noxy"] == "wake"` to wake the app; call `handleWakeUpNotification()` to reconnect and fetch.
+
+```kotlin
+// 1. Get FCM token (FirebaseMessaging.getInstance().token)
+// 2. Set it on the client
+client.setFcmToken(token)
+
+// 3. In FirebaseMessagingService.onMessageReceived, for data messages:
+override fun onMessageReceived(message: RemoteMessage) {
+    val data = message.data ?: return
+    if (NoxyClient.isNoxyWakeUp(data)) {
+        CoroutineScope(Dispatchers.Default).launch {
+            val result = client.handleWakeUpNotification(data)
+            // Use result (NewData, NoData, Failed) for logging or WorkManager
+        }
+    }
+}
+```
+
+---
+
 ## API Overview
 
 | Method | Description |
 |--------|-------------|
 | `initialize()` | Load or create device, connect to relay, authenticate |
 | `on(handler)` | Subscribe to notifications; handler receives decrypted payload |
+| `setFcmToken(token)` | Register FCM token for wake-up when backgrounded |
+| `handleWakeUpNotification(data?)` | Handle FCM wake-up: reconnect and fetch notifications |
 | `revokeDevice()` | Revoke device locally and on relay |
 | `rotateKeys()` | Rotate device keys locally and on relay |
 | `close()` | Disconnect from relay |
@@ -204,28 +242,40 @@ The network layer uses gRPC with generated client from `noxy.device.proto`. Prot
 
 ---
 
-## Example App
-
-An example app is in `examples/`. It demonstrates:
-
-- Initializing Noxy at app startup
-- Subscribing to notifications
-- Displaying decrypted notifications as Android push notifications
-- Copying wallet address to clipboard
-
-Configure the relay URL and app ID in `examples/app/build.gradle.kts` via `buildConfigField`, or use the default `https://relay.noxy.network`.
-
-```bash
-./gradlew :examples:app:assembleDebug
-```
-
----
-
 ## Building
 
 ```bash
 ./gradlew :noxy-sdk:assemble
 ```
+
+---
+
+## Publishing
+
+The SDK is published to Maven Central as `network.noxy:android-sdk`.
+
+**Version:** Set in `gradle.properties` as `NOXY_SDK_VERSION` (default: 1.0.0).
+
+**Publish to local Maven** (to verify before publishing to Maven Central):
+
+```bash
+./gradlew :noxy-sdk:publishToMavenLocal
+```
+
+Then in a consumer project, add `mavenLocal()` to repositories and `implementation("network.noxy:android-sdk:1.0.0")` to verify the artifact resolves.
+
+**Publish to Maven Central** (requires Sonatype credentials and GPG signing):
+
+```bash
+./gradlew :noxy-sdk:publishReleasePublicationToMavenCentral \
+  -PSONATYPE_USERNAME=your-username \
+  -PSONATYPE_PASSWORD=your-token \
+  -PSIGNING_KEY_ID=your-key-id \
+  -PSIGNING_KEY=base64-private-key \
+  -PSIGNING_PASSWORD=key-passphrase
+```
+
+**CI/CD:** The `.github/workflows/publish.yml` workflow publishes on release. Configure these secrets: `SONATYPE_USERNAME`, `SONATYPE_PASSWORD`, `SIGNING_KEY_ID`, `SIGNING_KEY`, `SIGNING_PASSWORD`.
 
 ---
 

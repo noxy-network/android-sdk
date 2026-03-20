@@ -35,6 +35,9 @@ message RegisterDevice {
   DevicePublicKeys device_pubkeys = 1;
   string wallet_address = 2;
   bytes signature = 3;
+  optional string apn_token = 4;   // Apple APNs token for waking iOS when offline
+  optional string fcm_token = 5;   // Google FCM token for waking Android when offline
+  string type = 6;  // required: browser, desktop, ios, android
 }
 
 message DevicePublicKeys {
@@ -44,6 +47,8 @@ message DevicePublicKeys {
 
 message SubscribeNotifications {
   optional bool subscribe = 1;  // true or omitted = subscribe, false = unsubscribe
+  optional string apn_token = 2;   // Update Apple APNs token (e.g. when rotated)
+  optional string fcm_token = 3;   // Update FCM token (e.g. when rotated)
 }
 
 message RevokeDevice {

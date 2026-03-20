@@ -2,6 +2,8 @@ plugins {
     id("com.android.library")
     id("org.jetbrains.kotlin.android")
     id("com.google.protobuf")
+    id("maven-publish")
+    id("signing")
 }
 
 protobuf {
@@ -76,4 +78,63 @@ dependencies {
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.7.3")
+}
+
+val sdkVersion: String = project.findProperty("NOXY_SDK_VERSION")?.toString() ?: "1.0.0"
+
+afterEvaluate {
+    publishing {
+        publications {
+            create<MavenPublication>("release") {
+                groupId = "network.noxy"
+                artifactId = "android-sdk"
+                version = sdkVersion
+
+                from(components["release"])
+
+                pom {
+                    name.set("Noxy Android SDK")
+                    description.set("Decentralized push notification SDK for Web3 apps. Wallet-based identity, end-to-end encrypted notifications.")
+                    url.set("https://github.com/noxy-network/android-sdk")
+                    licenses {
+                        license {
+                            name.set("MIT License")
+                            url.set("https://opensource.org/licenses/MIT")
+                        }
+                    }
+                    developers {
+                        developer {
+                            name.set("Noxy Network")
+                            organization.set("Noxy Network")
+                        }
+                    }
+                    scm {
+                        connection.set("scm:git:git://github.com/noxy-network/android-sdk.git")
+                        developerConnection.set("scm:git:ssh://github.com/noxy-network/android-sdk.git")
+                        url.set("https://github.com/noxy-network/android-sdk")
+                    }
+                }
+            }
+        }
+        repositories {
+            maven {
+                name = "MavenCentral"
+                url = uri("https://s01.oss.sonatype.org/service/local/staging/deploy/maven2/")
+                credentials {
+                    username = project.findProperty("SONATYPE_USERNAME")?.toString() ?: System.getenv("SONATYPE_USERNAME") ?: ""
+                    password = project.findProperty("SONATYPE_PASSWORD")?.toString() ?: System.getenv("SONATYPE_PASSWORD") ?: ""
+                }
+            }
+        }
+    }
+
+    signing {
+        val signingKey: String? = findProperty("signingKey") as String?
+        val signingPassword: String? = findProperty("signingPassword") as String?
+    
+        if (signingKey != null && signingPassword != null) {
+            useInMemoryPgpKeys(signingKey, signingPassword)
+            sign(publishing.publications["release"])
+        }
+    }
 }

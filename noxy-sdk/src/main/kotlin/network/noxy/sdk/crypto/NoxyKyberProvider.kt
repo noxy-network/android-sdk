@@ -57,7 +57,7 @@ class NoxyKyberProvider {
     }
 
     /**
-     * Encapsulate: generate ciphertext and shared secret from public key (for testing)
+     * Encapsulate: generate ciphertext and shared secret from public key.
      */
     internal fun encapsulate(publicKey: ByteArray): Pair<ByteArray, ByteArray> {
         if (publicKey.size != PK_BYTES) {
