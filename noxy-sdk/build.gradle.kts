@@ -116,16 +116,7 @@ afterEvaluate {
                 }
             }
         }
-        repositories {
-            maven {
-                name = "MavenCentral"
-                url = uri("https://s01.oss.sonatype.org/service/local/staging/deploy/maven2/")
-                credentials {
-                    username = project.findProperty("SONATYPE_USERNAME")?.toString() ?: System.getenv("SONATYPE_USERNAME") ?: ""
-                    password = project.findProperty("SONATYPE_PASSWORD")?.toString() ?: System.getenv("SONATYPE_PASSWORD") ?: ""
-                }
-            }
-        }
+        // Upload to Maven Central is handled by Nmcp (Central Publisher Portal), not maven-publish repositories.
     }
 
     signing {

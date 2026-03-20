@@ -13,14 +13,4 @@ plugins {
     id("com.android.library") version "8.7.2" apply false
     id("org.jetbrains.kotlin.android") version "1.9.22" apply false
     id("com.google.protobuf") version "0.9.6" apply false
-    id("io.github.gradle-nexus.publish-plugin") version "2.0.0"
-}
-
-nexusPublishing {
-    repositories {
-        sonatype {
-            nexusUrl.set(uri("https://ossrh-staging-api.central.sonatype.com/service/local/"))
-            snapshotRepositoryUrl.set(uri("https://central.sonatype.com/repository/maven-snapshots/"))
-        }
-    }
 }
