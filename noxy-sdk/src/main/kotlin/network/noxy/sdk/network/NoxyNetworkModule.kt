@@ -42,6 +42,7 @@ class NoxyNetworkModule(
 
     private val pendingRequests = mutableMapOf<String, kotlinx.coroutines.CompletableDeferred<DeviceResponse>>()
     private val pendingMutex = Mutex()
+    private val connectionMutex = Mutex()
 
     @Volatile
     private var pushHandler: (suspend (NoxyEncryptedNotification) -> Unit)? = null
@@ -61,33 +62,35 @@ class NoxyNetworkModule(
         return host to port
     }
 
-    suspend fun connect() = withContext(Dispatchers.IO) {
-        val (host, port) = parseRelayURL(options.relayUrl)
+    /** Connect to relay. Waits for any in-progress disconnect to finish (avoids race conditions). */
+    suspend fun connect() = connectionMutex.withLock {
+        withContext(Dispatchers.IO) {
+            val (host, port) = parseRelayURL(options.relayUrl)
+            val builder = OkHttpChannelBuilder.forAddress(host, port)
+                .useTransportSecurity()
 
-        val builder = OkHttpChannelBuilder.forAddress(host, port)
-            .useTransportSecurity()
+            channel = builder.build()
+            val stub = DeviceServiceGrpc.newStub(channel).withWaitForReady()
 
-        channel = builder.build()
-        val stub = DeviceServiceGrpc.newStub(channel).withWaitForReady()
-
-        requestStream = stub.handleMessage(object : StreamObserver<DeviceResponse> {
-            override fun onNext(value: DeviceResponse) {
-                scope.launch {
-                    handleResponse(value)
-                }
-            }
-
-            override fun onError(t: Throwable) {
-                scope.launch {
-                    pendingMutex.withLock {
-                        pendingRequests.values.forEach { it.completeExceptionally(t) }
-                        pendingRequests.clear()
+            requestStream = stub.handleMessage(object : StreamObserver<DeviceResponse> {
+                override fun onNext(value: DeviceResponse) {
+                    scope.launch {
+                        handleResponse(value)
                     }
                 }
-            }
 
-            override fun onCompleted() {}
-        })
+                override fun onError(t: Throwable) {
+                    scope.launch {
+                        pendingMutex.withLock {
+                            pendingRequests.values.forEach { it.completeExceptionally(t) }
+                            pendingRequests.clear()
+                        }
+                    }
+                }
+
+                override fun onCompleted() {}
+            })
+        }
     }
 
     private suspend fun handleResponse(response: DeviceResponse) {
@@ -162,14 +165,23 @@ class NoxyNetworkModule(
         deferred.await()
     }
 
-    suspend fun disconnect() = withContext(Dispatchers.IO) {
+    suspend fun disconnect() = connectionMutex.withLock {
+        withContext(Dispatchers.IO) { performDisconnect(timeoutSeconds = 5) }
+    }
+
+    /** Quick disconnect for wake-up reconnect; short timeout to re-establish connection ASAP. */
+    suspend fun disconnectForReconnect() = connectionMutex.withLock {
+        withContext(Dispatchers.IO) { performDisconnect(timeoutSeconds = 1) }
+    }
+
+    private suspend fun performDisconnect(timeoutSeconds: Long) = withContext(Dispatchers.IO) {
         pendingMutex.withLock {
             pendingRequests.values.forEach { it.completeExceptionally(NoxyError.General("Disconnected")) }
             pendingRequests.clear()
         }
         requestStream?.onCompleted()
         requestStream = null
-        channel?.shutdown()?.awaitTermination(5, TimeUnit.SECONDS)
+        channel?.shutdown()?.awaitTermination(timeoutSeconds, TimeUnit.SECONDS)
         channel = null
         sessionId = null
         networkDeviceId = null

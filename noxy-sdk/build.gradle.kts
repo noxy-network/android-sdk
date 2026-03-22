@@ -80,7 +80,7 @@ dependencies {
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.7.3")
 }
 
-val sdkVersion: String = project.findProperty("NOXY_SDK_VERSION")?.toString() ?: "1.0.0"
+val sdkVersion: String = project.findProperty("NOXY_SDK_VERSION")?.toString() ?: "1.0.1"
 
 afterEvaluate {
     publishing {

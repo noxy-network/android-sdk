@@ -154,30 +154,46 @@ class NoxyClient(
     private suspend fun performWakeUpFetch(): NoxyWakeUpResult {
         val handler = notificationHandler ?: return NoxyWakeUpResult.NoData
 
-        networkModule.disconnect()
+        // Only disconnect if we have a live connection (avoids no-op when app was terminated)
+        if (networkModule.isConnected) {
+            networkModule.disconnectForReconnect()
+        }
         val device = deviceModule.load(identity.address, networkOptions.appId)
             ?: return NoxyWakeUpResult.NoData
         if (device.isRevoked == true) return NoxyWakeUpResult.NoData
 
         deviceModule.loadDevicePrivateKeys()
 
-        return try {
-            networkModule.connect()
-            networkModule.authenticateDevice(device)
-            networkModule.subscribeToNotifications(
-                fcmToken = effectiveFcmToken,
-                handler = { envelope ->
-                    try {
-                        val decrypted = notificationModule.decryptNotification(envelope)
-                        if (decrypted != null) handler(decrypted)
-                    } catch (_: Exception) {}
+        val maxAttempts = 3
+        for (attempt in 1..maxAttempts) {
+            try {
+                // 1. Establish live gRPC connection (reconnect)
+                networkModule.connect()
+                if (!networkModule.isConnected) throw Exception("Connection not established")
+                // 2. Authenticate device again to establish session
+                networkModule.authenticateDevice(device)
+                // 3. Subscribe for notifications over the live connection
+                networkModule.subscribeToNotifications(
+                    fcmToken = effectiveFcmToken,
+                    handler = { envelope ->
+                        try {
+                            val decrypted = notificationModule.decryptNotification(envelope)
+                            if (decrypted != null) handler(decrypted)
+                        } catch (_: Exception) {}
+                    }
+                )
+                kotlinx.coroutines.delay(20_000)
+                return NoxyWakeUpResult.NewData
+            } catch (_: Exception) {
+                if (attempt < maxAttempts) {
+                    networkModule.disconnectForReconnect()
+                    kotlinx.coroutines.delay(500)
+                } else {
+                    return NoxyWakeUpResult.Failed
                 }
-            )
-            kotlinx.coroutines.delay(20_000)
-            NoxyWakeUpResult.NewData
-        } catch (_: Exception) {
-            NoxyWakeUpResult.Failed
+            }
         }
+        return NoxyWakeUpResult.Failed
     }
 
     /**

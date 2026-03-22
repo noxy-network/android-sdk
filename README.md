@@ -35,7 +35,7 @@ repositories {
 }
 
 dependencies {
-    implementation("network.noxy:android-sdk:1.0.0")
+    implementation("network.noxy:android-sdk:1.0.1")
 }
 ```
 
