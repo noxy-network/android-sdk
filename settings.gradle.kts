@@ -20,6 +20,8 @@ dependencyResolutionManagement {
 
 rootProject.name = "noxy-android-sdk"
 include(":noxy-sdk")
+include(":noxy-example-app")
+project(":noxy-example-app").projectDir = file("examples/noxy-example-app")
 
 // Maven Central via Sonatype Central Publisher Portal (not OSSRH staging API).
 // Uses https://central.sonatype.com/ — default publishingType is AUTOMATIC (publish after validation).

@@ -1,9 +1,9 @@
 package network.noxy.sdk.network
 
 /**
- * Encrypted notification envelope. Ciphertext = encrypted_data || tag (last 16 bytes are GCM auth tag).
+ * Encrypted decision event from the relay. Ciphertext = encrypted_data || tag (last 16 bytes are GCM auth tag).
  */
-data class NoxyEncryptedNotification(
+data class NoxyEncryptedDecision(
     val kyberCt: ByteArray,
     val nonce: ByteArray,
     val ciphertext: ByteArray
@@ -15,7 +15,7 @@ data class NoxyEncryptedNotification(
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (javaClass != other?.javaClass) return false
-        other as NoxyEncryptedNotification
+        other as NoxyEncryptedDecision
         return kyberCt.contentEquals(other.kyberCt) &&
             nonce.contentEquals(other.nonce) &&
             ciphertext.contentEquals(other.ciphertext)

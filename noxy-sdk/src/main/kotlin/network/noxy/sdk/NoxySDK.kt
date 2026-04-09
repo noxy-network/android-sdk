@@ -6,27 +6,22 @@ import network.noxy.sdk.network.NoxyNetworkOptions
 import network.noxy.sdk.storage.NoxyStorage
 
 /**
- * Create and initialize a Noxy client
+ * Create a [NoxyClient] for the Noxy Decision Layer (encrypted decision requests + outcomes).
  *
  * @param context Android context (for storage)
  * @param identity EOA or SCW wallet identity with signer
  * @param network Relay gRPC URL and app ID
  * @param storage Optional custom storage (default: EncryptedSharedPreferences)
- * @return NoxyClient instance
  *
  * Example:
  * ```kotlin
- * val identity = NoxyIdentity.Eoa(NoxyEoaWalletIdentity(
- *     address = "0x...",
- *     signer = { data -> Signature(bytes = wallet.signMessage(data)) }
- * ))
  * val client = createNoxyClient(
  *     context = context,
  *     identity = identity,
  *     network = NoxyNetworkOptions(appId = "your-app", relayUrl = "https://relay.noxy.network")
  * )
  * client.initialize()
- * client.on { notification -> println(notification) }
+ * client.on { relayMessageId, decision -> ... }
  * ```
  */
 fun createNoxyClient(

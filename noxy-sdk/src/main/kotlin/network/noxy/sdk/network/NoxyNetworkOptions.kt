@@ -12,7 +12,6 @@ data class NoxyNetworkOptions(
     val relayUrl: String,
     val maxRetries: Int = 5,
     val retryTimeoutMs: Long = 15_000,
-    val requireAck: Boolean = false,
-    /** FCM token for wake-up when offline. Set via options or setFcmToken() */
+    /** FCM token for wake-up when offline. Set via options or [network.noxy.sdk.NoxyClient.setFcmToken] */
     val fcmToken: String? = null
 )

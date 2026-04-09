@@ -1,17 +1,23 @@
 package network.noxy.sdk
 
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import network.noxy.sdk.decision.NoxyDecisionCryptoModule
 import network.noxy.sdk.device.NoxyDeviceModule
 import network.noxy.sdk.identity.NoxyIdentity
 import network.noxy.sdk.identity.WalletAddress
+import network.noxy.sdk.network.NoxyDecisionChoice
+import network.noxy.sdk.network.NoxyEncryptedDecision
 import network.noxy.sdk.network.NoxyNetworkModule
 import network.noxy.sdk.network.NoxyNetworkOptions
-import network.noxy.sdk.notification.NoxyNotificationModule
 import network.noxy.sdk.storage.NoxyStorage
 
 /**
- * Main Noxy client. Lightweight orchestrator.
+ * Main Noxy client for the Noxy Decision Layer: wallet identity, relay connection,
+ * encrypted decision requests, and outcomes (approve/reject).
  *
  * When [NoxyNetworkOptions.fcmToken] or [setFcmToken] is set: online + offline (FCM wake-up).
  * When not set: online only.
@@ -23,13 +29,14 @@ class NoxyClient(
 ) {
     private val deviceModule = NoxyDeviceModule(storage)
     private val networkModule = NoxyNetworkModule(networkOptions)
-    private val notificationModule = NoxyNotificationModule(deviceModule)
+    private val decisionCryptoModule = NoxyDecisionCryptoModule(deviceModule)
+    private val ackScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     @Volatile
     private var fcmToken: String? = null
 
     @Volatile
-    private var notificationHandler: ((Map<String, Any?>) -> Unit)? = null
+    private var decisionHandler: (suspend (String?, Map<String, Any?>) -> Unit)? = null
 
     private val effectiveFcmToken: String?
         get() = fcmToken?.takeIf { it.isNotEmpty() } ?: networkOptions.fcmToken
@@ -41,7 +48,6 @@ class NoxyClient(
 
     /**
      * Register FCM token for wake-up pushes when app is backgrounded.
-     * Call when FirebaseMessaging.getInstance().token addsOnCompleteListener fires.
      */
     fun setFcmToken(token: String?) {
         fcmToken = token
@@ -49,8 +55,6 @@ class NoxyClient(
 
     /**
      * Initialize: load or create device, connect to network, authenticate.
-     * Only registers (announces) the device on the relay when the authenticate response
-     * contains requires_registration: true.
      */
     suspend fun initialize() = withContext(Dispatchers.IO) {
         networkModule.connect()
@@ -107,31 +111,81 @@ class NoxyClient(
     }
 
     /**
-     * Subscribe to notifications. Loads device private keys first.
+     * Subscribe to encrypted decision requests from the relay.
+     * [handler] receives the relay stream `message_id` and decrypted JSON (use the id for outcomes when JSON has no `decision_id`).
      */
-    suspend fun on(handler: (Map<String, Any?>) -> Unit) = withContext(Dispatchers.IO) {
-        notificationHandler = handler
+    suspend fun on(handler: suspend (String?, Map<String, Any?>) -> Unit) = withContext(Dispatchers.IO) {
+        decisionHandler = handler
         deviceModule.loadDevicePrivateKeys()
-        networkModule.subscribeToNotifications(
+        networkModule.subscribeToDecisions(
             fcmToken = effectiveFcmToken,
-            handler = { envelope ->
-                try {
-                    val decrypted = notificationModule.decryptNotification(envelope)
-                    if (decrypted != null) {
-                        handler(decrypted)
-                    }
-                } catch (_: Exception) {
-                    // Decryption failed; silently ignored
-                }
+            handler = { envelope, relayMessageId ->
+                deliverDecision(envelope, relayMessageId, handler)
             }
         )
     }
 
+    private suspend fun deliverDecision(
+        envelope: NoxyEncryptedDecision,
+        relayMessageId: String?,
+        notifyUser: suspend (String?, Map<String, Any?>) -> Unit
+    ) {
+        val decrypted = try {
+            decisionCryptoModule.decryptDecision(envelope) ?: return
+        } catch (_: Exception) {
+            return
+        }
+        // Deliver first; do not await sendDecisionAck here (same bidi stream deadlock as iOS).
+        notifyUser(relayMessageId, decrypted)
+        val ackId = deliveryAckDecisionId(decrypted, relayMessageId) ?: return
+        ackScope.launch {
+            try {
+                networkModule.sendDecisionAck(ackId)
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    private fun deliveryAckDecisionId(decision: Map<String, Any?>, relayMessageId: String?): String? {
+        if (!relayMessageId.isNullOrEmpty()) return relayMessageId
+        (decision["decision_id"] as? String)?.takeIf { it.isNotEmpty() }?.let { return it }
+        (decision["decisionId"] as? String)?.takeIf { it.isNotEmpty() }?.let { return it }
+        (decision["message_id"] as? String)?.takeIf { it.isNotEmpty() }?.let { return it }
+        return null
+    }
+
     /**
-     * Check if FCM data payload is a Noxy wake-up.
-     * Relay sends data with `noxy: "wake"` in the data map.
+     * Send the user's choice to the relay: **Approve** or **Reject** ([DecisionOutcome] in proto).
      */
+    suspend fun sendDecisionOutcome(
+        decisionId: String,
+        outcome: NoxyDecisionChoice,
+        receivedAt: Long? = null
+    ) = withContext(Dispatchers.IO) {
+        networkModule.sendDecisionOutcome(decisionId, outcome, receivedAt)
+    }
+
+    /**
+     * Delivery receipt: tells the relay the device **received** the decision request ([DecisionAck] in proto).
+     * Not the user's approve/reject — use [sendDecisionOutcome]. Normally sent automatically after decrypt.
+     */
+    suspend fun sendDecisionAck(decisionId: String, receivedAt: Long? = null) = withContext(Dispatchers.IO) {
+        networkModule.sendDecisionAck(decisionId, receivedAt)
+    }
+
     companion object {
+        /**
+         * Resolves the decision id to use with [sendDecisionOutcome] from decrypted JSON and the relay stream id.
+         * Precedence: `decision_id`, `decisionId`, `message_id` (JSON), then [relayMessageId].
+         */
+        @JvmStatic
+        fun resolveDecisionId(decision: Map<String, Any?>, relayMessageId: String?): String? {
+            (decision["decision_id"] as? String)?.takeIf { it.isNotEmpty() }?.let { return it }
+            (decision["decisionId"] as? String)?.takeIf { it.isNotEmpty() }?.let { return it }
+            (decision["message_id"] as? String)?.takeIf { it.isNotEmpty() }?.let { return it }
+            return relayMessageId?.takeIf { it.isNotEmpty() }
+        }
+
         @JvmStatic
         fun isNoxyWakeUp(data: Map<String, String>?): Boolean {
             if (data == null) return false
@@ -140,10 +194,7 @@ class NoxyClient(
     }
 
     /**
-     * Handle FCM wake-up: reconnect to relay and fetch notifications.
-     * Call from FirebaseMessagingService.onMessageReceived when a data message indicates
-     * a Noxy wake (e.g. noxy: "wake" in data).
-     * If [data] is provided, only proceeds when it matches relay wake format.
+     * Handle FCM wake-up: reconnect to relay and resume the decision stream.
      */
     suspend fun handleWakeUpNotification(data: Map<String, String>? = null): NoxyWakeUpResult =
         withContext(Dispatchers.IO) {
@@ -152,9 +203,8 @@ class NoxyClient(
         }
 
     private suspend fun performWakeUpFetch(): NoxyWakeUpResult {
-        val handler = notificationHandler ?: return NoxyWakeUpResult.NoData
+        val handler = decisionHandler ?: return NoxyWakeUpResult.NoData
 
-        // Only disconnect if we have a live connection (avoids no-op when app was terminated)
         if (networkModule.isConnected) {
             networkModule.disconnectForReconnect()
         }
@@ -167,19 +217,13 @@ class NoxyClient(
         val maxAttempts = 3
         for (attempt in 1..maxAttempts) {
             try {
-                // 1. Establish live gRPC connection (reconnect)
                 networkModule.connect()
                 if (!networkModule.isConnected) throw Exception("Connection not established")
-                // 2. Authenticate device again to establish session
                 networkModule.authenticateDevice(device)
-                // 3. Subscribe for notifications over the live connection
-                networkModule.subscribeToNotifications(
+                networkModule.subscribeToDecisions(
                     fcmToken = effectiveFcmToken,
-                    handler = { envelope ->
-                        try {
-                            val decrypted = notificationModule.decryptNotification(envelope)
-                            if (decrypted != null) handler(decrypted)
-                        } catch (_: Exception) {}
+                    handler = { envelope, relayMessageId ->
+                        deliverDecision(envelope, relayMessageId, handler)
                     }
                 )
                 kotlinx.coroutines.delay(20_000)

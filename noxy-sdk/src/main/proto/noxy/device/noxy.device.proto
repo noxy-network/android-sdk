@@ -20,11 +20,21 @@ message DeviceRequest {
   oneof payload {
     Authenticate authenticate = 7;
     RegisterDevice register_device = 8;
-    SubscribeNotifications subscribe_notifications = 9;
+    SubscribeDecisions subscribe_decisions = 9;
     RevokeDevice revoke_device = 10;
     RotateDeviceKeys rotate_device_keys = 11;
-    ClientAck client_ack = 12;
+    // User tapped Approve or Reject in the client UI (human decision).
+    DecisionOutcome decision_outcome = 12;
+    // Device received and decrypted the relay's decision request (delivery receipt only; not the user's choice).
+    DecisionAck decision_ack = 13;
   }
+}
+
+// Tells the relay this device received the encrypted decision request (decrypt succeeded).
+// This is not the user's approve/reject — use DecisionOutcome for that.
+message DecisionAck {
+  string decision_id = 1;
+  uint64 received_at = 2;
 }
 
 message Authenticate {
@@ -37,7 +47,7 @@ message RegisterDevice {
   bytes signature = 3;
   optional string apn_token = 4;   // Apple APNs token for waking iOS when offline
   optional string fcm_token = 5;   // Google FCM token for waking Android when offline
-  string type = 6;  // required: browser, desktop, ios, android
+  string type = 6;  // required: browser, desktop, ios, android, telegram
 }
 
 message DevicePublicKeys {
@@ -45,7 +55,7 @@ message DevicePublicKeys {
   bytes pq_public_key = 2;
 }
 
-message SubscribeNotifications {
+message SubscribeDecisions {
   optional bool subscribe = 1;  // true or omitted = subscribe, false = unsubscribe
   optional string apn_token = 2;   // Update Apple APNs token (e.g. when rotated)
   optional string fcm_token = 3;   // Update FCM token (e.g. when rotated)
@@ -62,9 +72,16 @@ message RotateDeviceKeys {
   bytes signature = 3;
 }
 
-message ClientAck {
-  string message_id = 1;
-  uint64 received_at = 2;
+// User's response to a decision request: Approve or Reject (sent after the user acts in the UI).
+message DecisionOutcome {
+  string decision_id = 1;
+  DecisionOutcomeValue outcome = 2;
+  uint64 received_at = 3;
+}
+
+enum DecisionOutcomeValue {
+  APPROVE = 0;
+  REJECT = 1;
 }
 
 message DeviceResponse {
@@ -75,16 +92,22 @@ message DeviceResponse {
   oneof payload {
     AuthenticateResponse authenticate = 5;
     RegisterDeviceResponse register_device = 6;
-    SubscribeNotificationsResponse subscribe_notifications = 7;
+    SubscribeDecisionsResponse subscribe_decisions = 7;
     RevokeDeviceResponse revoke_device = 8;
     RotateDeviceKeysResponse rotate_device_keys = 9;
-    ClientAckResponse client_ack = 10;
-    PushEvent push_event = 11;
+    DecisionOutcomeResponse decision_outcome = 10;
+    DecisionEvent decision_event = 11;
+    DecisionRoutedResponse decision_routed = 13;
     ErrorResponse error = 12;
+    DecisionAckResponse decision_ack = 14;
   }
 }
 
-message PushEvent {
+message DecisionAckResponse {
+  string decision_id = 1;
+}
+
+message DecisionEvent {
   bytes kyber_ct = 1;
   bytes nonce = 2;
   bytes ciphertext = 3;
@@ -107,7 +130,7 @@ message RegisterDeviceResponse {
   string session_id = 3;
 }
 
-message SubscribeNotificationsResponse {
+message SubscribeDecisionsResponse {
   bool subscribed = 1;
 }
 
@@ -119,8 +142,13 @@ message RotateDeviceKeysResponse {
   uint64 rotated_at = 1;
 }
 
-message ClientAckResponse {
-  string acked_message_id = 1;
+message DecisionOutcomeResponse {
+  string decision_id = 1;
+  DecisionOutcomeValue outcome = 2;
+}
+
+message DecisionRoutedResponse {
+  string decision_id = 1;
 }
 
 message ErrorResponse {

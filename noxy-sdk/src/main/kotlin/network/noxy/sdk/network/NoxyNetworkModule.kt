@@ -1,5 +1,6 @@
 package network.noxy.sdk.network
 
+import com.google.protobuf.ByteString
 import io.grpc.ManagedChannel
 import io.grpc.okhttp.OkHttpChannelBuilder
 import io.grpc.stub.StreamObserver
@@ -13,9 +14,13 @@ import kotlinx.coroutines.withContext
 import network.noxy.sdk.NoxyError
 import network.noxy.sdk.device.NoxyDevice
 import network.noxy.sdk.identity.WalletAddress
+import noxy.device.DecisionAck
+import noxy.device.DecisionOutcome
+import noxy.device.DecisionOutcomeValue
 import noxy.device.DeviceRequest
 import noxy.device.DeviceResponse
 import noxy.device.DeviceServiceGrpc
+import noxy.device.SubscribeDecisions
 import java.net.URL
 import java.util.UUID
 import java.util.concurrent.TimeUnit
@@ -45,7 +50,7 @@ class NoxyNetworkModule(
     private val connectionMutex = Mutex()
 
     @Volatile
-    private var pushHandler: (suspend (NoxyEncryptedNotification) -> Unit)? = null
+    private var decisionHandler: (suspend (NoxyEncryptedDecision, String?) -> Unit)? = null
 
     val isConnected: Boolean get() = channel != null
     val isReady: Boolean get() = isConnected && sessionId != null && networkDeviceId != null
@@ -95,14 +100,16 @@ class NoxyNetworkModule(
 
     private suspend fun handleResponse(response: DeviceResponse) {
         when (response.payloadCase) {
-            DeviceResponse.PayloadCase.PUSH_EVENT -> {
-                val push = response.pushEvent
-                pushHandler?.invoke(
-                    NoxyEncryptedNotification(
-                        kyberCt = push.kyberCt.toByteArray(),
-                        nonce = push.nonce.toByteArray(),
-                        ciphertext = push.ciphertext.toByteArray()
-                    )
+            DeviceResponse.PayloadCase.DECISION_EVENT -> {
+                val ev = response.decisionEvent
+                val relayMessageId = if (response.hasMessageId()) response.messageId else null
+                decisionHandler?.invoke(
+                    NoxyEncryptedDecision(
+                        kyberCt = ev.kyberCt.toByteArray(),
+                        nonce = ev.nonce.toByteArray(),
+                        ciphertext = ev.ciphertext.toByteArray()
+                    ),
+                    relayMessageId
                 )
             }
             DeviceResponse.PayloadCase.AUTHENTICATE -> {
@@ -117,11 +124,15 @@ class NoxyNetworkModule(
                 sessionId = reg.sessionId
                 resumePending(response.requestId, response)
             }
-            DeviceResponse.PayloadCase.SUBSCRIBE_NOTIFICATIONS,
+            DeviceResponse.PayloadCase.SUBSCRIBE_DECISIONS,
             DeviceResponse.PayloadCase.REVOKE_DEVICE,
             DeviceResponse.PayloadCase.ROTATE_DEVICE_KEYS,
-            DeviceResponse.PayloadCase.CLIENT_ACK -> {
+            DeviceResponse.PayloadCase.DECISION_OUTCOME,
+            DeviceResponse.PayloadCase.DECISION_ACK -> {
                 resumePending(response.requestId, response)
+            }
+            DeviceResponse.PayloadCase.DECISION_ROUTED -> {
+                // ignore
             }
             DeviceResponse.PayloadCase.ERROR -> {
                 val err = response.error
@@ -158,7 +169,7 @@ class NoxyNetworkModule(
             .setRequestId(requestId)
             .setAppId(options.appId)
             .setTimestamp(if (request.timestamp == 0L) System.currentTimeMillis() else request.timestamp)
-            .setNonce(com.google.protobuf.ByteString.copyFrom(ByteArray(12).apply { java.security.SecureRandom().nextBytes(this) }))
+            .setNonce(ByteString.copyFrom(ByteArray(12).apply { java.security.SecureRandom().nextBytes(this) }))
             .build()
 
         stream.onNext(req)
@@ -185,7 +196,7 @@ class NoxyNetworkModule(
         channel = null
         sessionId = null
         networkDeviceId = null
-        pushHandler = null
+        decisionHandler = null
     }
 
     /**
@@ -198,8 +209,8 @@ class NoxyNetworkModule(
                 noxy.device.Authenticate.newBuilder()
                     .setDevicePubkeys(
                         noxy.device.DevicePublicKeys.newBuilder()
-                            .setPublicKey(com.google.protobuf.ByteString.copyFrom(device.publicKey))
-                            .setPqPublicKey(com.google.protobuf.ByteString.copyFrom(device.pqPublicKey))
+                            .setPublicKey(ByteString.copyFrom(device.publicKey))
+                            .setPqPublicKey(ByteString.copyFrom(device.pqPublicKey))
                     )
             )
             .build()
@@ -230,11 +241,11 @@ class NoxyNetworkModule(
         val regBuilder = noxy.device.RegisterDevice.newBuilder()
             .setDevicePubkeys(
                 noxy.device.DevicePublicKeys.newBuilder()
-                    .setPublicKey(com.google.protobuf.ByteString.copyFrom(devicePubkeys.first))
-                    .setPqPublicKey(com.google.protobuf.ByteString.copyFrom(devicePubkeys.second))
+                    .setPublicKey(ByteString.copyFrom(devicePubkeys.first))
+                    .setPqPublicKey(ByteString.copyFrom(devicePubkeys.second))
             )
             .setWalletAddress(walletAddress)
-            .setSignature(com.google.protobuf.ByteString.copyFrom(signature))
+            .setSignature(ByteString.copyFrom(signature))
             .setType("android")
         if (!fcmToken.isNullOrEmpty()) regBuilder.setFcmToken(fcmToken)
 
@@ -262,7 +273,7 @@ class NoxyNetworkModule(
             .setRevokeDevice(
                 noxy.device.RevokeDevice.newBuilder()
                     .setWalletAddress(walletAddress)
-                    .setSignature(com.google.protobuf.ByteString.copyFrom(signature))
+                    .setSignature(ByteString.copyFrom(signature))
             )
             .build()
         sendAndWait(req)
@@ -281,33 +292,73 @@ class NoxyNetworkModule(
                 noxy.device.RotateDeviceKeys.newBuilder()
                     .setNewPubkeys(
                         noxy.device.DevicePublicKeys.newBuilder()
-                            .setPublicKey(com.google.protobuf.ByteString.copyFrom(newPubkeys.first))
-                            .setPqPublicKey(com.google.protobuf.ByteString.copyFrom(newPubkeys.second))
+                            .setPublicKey(ByteString.copyFrom(newPubkeys.first))
+                            .setPqPublicKey(ByteString.copyFrom(newPubkeys.second))
                     )
                     .setWalletAddress(walletAddress)
-                    .setSignature(com.google.protobuf.ByteString.copyFrom(signature))
+                    .setSignature(ByteString.copyFrom(signature))
             )
             .build()
         sendAndWait(req)
     }
 
     /**
-     * Subscribe to notifications stream
+     * Subscribe to encrypted decision events from the relay.
      */
-    suspend fun subscribeToNotifications(
-        handler: suspend (NoxyEncryptedNotification) -> Unit,
+    suspend fun subscribeToDecisions(
+        handler: suspend (NoxyEncryptedDecision, String?) -> Unit,
         fcmToken: String? = null
     ) = withContext(Dispatchers.IO) {
-        pushHandler = handler
+        decisionHandler = handler
 
-        val subBuilder = noxy.device.SubscribeNotifications.newBuilder().setSubscribe(true)
+        val subBuilder = SubscribeDecisions.newBuilder().setSubscribe(true)
         if (!fcmToken.isNullOrEmpty()) subBuilder.setFcmToken(fcmToken)
 
         val reqBuilder = DeviceRequest.newBuilder()
-            .setSubscribeNotifications(subBuilder)
+            .setSubscribeDecisions(subBuilder)
         currentDeviceId?.let { reqBuilder.setDeviceId(it) }
         currentSessionId?.let { reqBuilder.setSessionId(it) }
 
         sendAndWait(reqBuilder.build())
+    }
+
+    /**
+     * Sends [DecisionOutcome] (proto): user's **Approve** or **Reject** after they act in the UI.
+     */
+    suspend fun sendDecisionOutcome(
+        decisionId: String,
+        outcome: NoxyDecisionChoice,
+        receivedAt: Long? = null
+    ) = withContext(Dispatchers.IO) {
+        val protoOutcome = when (outcome) {
+            NoxyDecisionChoice.Approve -> DecisionOutcomeValue.APPROVE
+            NoxyDecisionChoice.Reject -> DecisionOutcomeValue.REJECT
+        }
+        val b = DeviceRequest.newBuilder()
+            .setDecisionOutcome(
+                DecisionOutcome.newBuilder()
+                    .setDecisionId(decisionId)
+                    .setOutcome(protoOutcome)
+                    .setReceivedAt(receivedAt ?: System.currentTimeMillis())
+            )
+        currentDeviceId?.let { b.setDeviceId(it) }
+        currentSessionId?.let { b.setSessionId(it) }
+        sendAndWait(b.build())
+    }
+
+    /**
+     * Sends [DecisionAck] (proto): relay is notified the device **received** the decision request (decrypt ok).
+     * For the user's Approve/Reject use [sendDecisionOutcome].
+     */
+    suspend fun sendDecisionAck(decisionId: String, receivedAt: Long? = null) = withContext(Dispatchers.IO) {
+        val b = DeviceRequest.newBuilder()
+            .setDecisionAck(
+                DecisionAck.newBuilder()
+                    .setDecisionId(decisionId)
+                    .setReceivedAt(receivedAt ?: System.currentTimeMillis())
+            )
+        currentDeviceId?.let { b.setDeviceId(it) }
+        currentSessionId?.let { b.setSessionId(it) }
+        sendAndWait(b.build())
     }
 }

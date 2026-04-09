@@ -1,30 +1,30 @@
-package network.noxy.sdk.notification
+package network.noxy.sdk.decision
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import network.noxy.sdk.NoxyError
 import network.noxy.sdk.crypto.NoxyKyberProvider
 import network.noxy.sdk.device.NoxyDeviceModule
-import network.noxy.sdk.network.NoxyEncryptedNotification
+import network.noxy.sdk.network.NoxyEncryptedDecision
 import org.json.JSONObject
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
 /**
- * Decrypts encrypted notifications using Kyber decapsulation, HKDF key derivation, and AES-GCM.
+ * Decrypts encrypted decision payloads from the Noxy Decision Layer (Kyber + HKDF + AES-GCM).
  */
-class NoxyNotificationModule(
+class NoxyDecisionCryptoModule(
     private val deviceModule: NoxyDeviceModule,
     private val kyber: NoxyKyberProvider = NoxyKyberProvider()
 ) {
 
     /**
-     * Decrypt notification envelope to plain payload (JSON object as Map)
+     * Decrypt a decision event envelope to a plain JSON map (e.g. `title`, `summary`, `decision_id`).
      */
-    suspend fun decryptNotification(envelope: NoxyEncryptedNotification): Map<String, Any?>? = withContext(Dispatchers.IO) {
+    suspend fun decryptDecision(envelope: NoxyEncryptedDecision): Map<String, Any?>? = withContext(Dispatchers.IO) {
         val keys = deviceModule.loadDevicePrivateKeys()
-            ?: throw NoxyError.General("Device cannot decrypt notification")
+            ?: throw NoxyError.General("Device cannot decrypt decision")
 
         val sharedSecret = try {
             kyber.decapsulate(keys.pqPrivateKey, envelope.kyberCt)
@@ -94,7 +94,7 @@ private fun JSONObject.toMap(): Map<String, Any?> {
     val map = mutableMapOf<String, Any?>()
     keys().forEach { key ->
         map[key] = when (val v = get(key)) {
-            is JSONObject -> (v as JSONObject).toMap()
+            is JSONObject -> v.toMap()
             is org.json.JSONArray -> v.toList()
             else -> v
         }

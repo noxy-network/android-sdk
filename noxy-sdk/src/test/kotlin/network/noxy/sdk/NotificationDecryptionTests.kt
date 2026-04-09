@@ -2,13 +2,11 @@ package network.noxy.sdk
 
 import kotlinx.coroutines.test.runTest
 import network.noxy.sdk.crypto.NoxyKyberProvider
-import network.noxy.sdk.network.NoxyEncryptedNotification
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNotNull
 import org.junit.Test
 
 /**
- * Verifies notification decryption: Kyber decapsulate → HKDF → AES-GCM decrypt
+ * Verifies Kyber KEM used for decision payload encryption (Kyber decapsulate → HKDF → AES-GCM in SDK).
  */
 class NotificationDecryptionTests {
 

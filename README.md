@@ -1,17 +1,19 @@
 # 📦 @noxy-network/android-sdk
 
-**Noxy** is a decentralized push notification network for Web3 apps. This SDK lets your Android app receive secure, end-to-end encrypted notifications using **wallet-based identity** — no emails or phone numbers.
+Android SDK to integrate with the [Noxy](https://noxy.network) **Decision Layer**: subscribe to encrypted decision requests, present them to the user, and respond with decision — all with wallet-based identity.
 
-Users register a device once with a wallet signature. After that, they receive real-time or store-and-forward notifications — **without centralized user accounts**.
+Users register a device once with a wallet signature. The relay streams encrypted decision payloads; the SDK decrypts them locally and can send `DecisionOutcome` back over the same gRPC session.
+
+**Before you integrate:** Create your app at [noxy.network](https://noxy.network). When the app is created, you receive an **app id** and an **app token** (auth token). This Android SDK uses the **app id** (`appId` in `NoxyNetworkOptions`). The **app token** is for agent/orchestrator SDKs (Go, Rust, Python, Node, etc.), not for this package.
 
 ---
 
 ## Features
 
-- **Wallet-based identity** — EOA and Smart Contract Wallets; no email or phone
-- **End-to-end encrypted notifications** — Kyber (post-quantum) + AES-GCM
-- **One-time device registration** — Sign with wallet; device keys and post-quantum keys generated and stored securely
-- **Relay-based delivery** — gRPC connection to relay; real-time or store-and-forward
+- **Wallet-based identity** — EOA and Smart Contract Wallets
+- **Encrypted decision events** — Kyber (post-quantum) + AES-GCM for payloads from the Decision Layer
+- **Subscribe / outcomes** — `SubscribeDecisions` on the relay; `sendDecisionOutcome` for approve/reject
+- **Optional FCM wake-up** — Reconnect when the app is backgrounded (`setFcmToken`, `handleWakeUpNotification`)
 - **Secure storage** — EncryptedSharedPreferences backed by Android Keystore for device data and private keys
 
 ---
@@ -35,7 +37,7 @@ repositories {
 }
 
 dependencies {
-    implementation("network.noxy:android-sdk:1.0.1")
+    implementation("network.noxy:android-sdk:2.0.0")
 }
 ```
 
@@ -59,17 +61,16 @@ dependencies {
 ```kotlin
 import network.noxy.sdk.*
 import network.noxy.sdk.identity.*
+import network.noxy.sdk.network.NoxyDecisionChoice
 
-// 1. Create identity with wallet signer
 val identity = NoxyIdentity.Eoa(NoxyEoaWalletIdentity(
-    address = "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb1",
+    address = "0x...",
     signer = { data ->
         val sig = wallet.signMessage(data)
         Signature(bytes = sig)
     }
 ))
 
-// 2. Create client (optionally with fcmToken for offline wake-up)
 val client = createNoxyClient(
     context = context,
     identity = identity,
@@ -80,145 +81,41 @@ val client = createNoxyClient(
     )
 )
 
-// Or set FCM token later when Firebase returns it
 client.setFcmToken(firebaseToken)
 
-// 3. Initialize (loads or registers device, connects to relay)
+var pendingDecisionId: String? = null
+
 lifecycleScope.launch {
     client.initialize()
 }
 
-// 4. Subscribe to notifications
 lifecycleScope.launch {
-    client.on { notification ->
-        // notification is the decrypted payload (e.g. { "title": "...", "body": "...", "data": {...} })
-        handleNotification(notification)
+    client.on { relayMessageId, decision ->
+        val title = decision["title"] as? String
+        val summary = decision["summary"] as? String
+        val decisionId = NoxyClient.resolveDecisionId(decision, relayMessageId)
+            ?: return@on
+        // Show UI (e.g. dialog or full-screen Activity)
     }
 }
 
-// 5. Disconnect when done
+// In your Activity, Fragment, or notification receiver — wire this to Approve / Reject taps:
+fun onApproveOrRejectClick(approve: Boolean) {
+    lifecycleScope.launch {
+        val id = pendingDecisionId ?: return@launch
+        client.sendDecisionOutcome(
+            id,
+            if (approve) NoxyDecisionChoice.Approve else NoxyDecisionChoice.Reject
+        )
+    }
+}
+
 lifecycleScope.launch {
     client.close()
 }
 ```
 
----
-
-## Usage Examples
-
-### EOA Identity (Externally Owned Account)
-
-```kotlin
-val identity = NoxyIdentity.Eoa(NoxyEoaWalletIdentity(
-    address = walletAddress,
-    signer = { data ->
-        val sig = yourWallet.signMessage(data)
-        Signature(bytes = sig)
-    }
-))
-```
-
-### Smart Contract Wallet Identity
-
-```kotlin
-val identity = NoxyIdentity.Scw(NoxyScwWalletIdentity(
-    address = scwAddress,
-    signer = { data ->
-        val sig = yourWallet.signMessage(data)
-        Signature(bytes = sig)
-    }
-))
-```
-
-### Custom Storage
-
-```kotlin
-val storage = NoxyStorage(
-    context = context,
-    storageName = "com.yourapp.noxy"
-)
-
-val client = createNoxyClient(
-    context = context,
-    identity = identity,
-    network = networkOptions,
-    storage = storage
-)
-```
-
-### Displaying Notifications
-
-Request notification permission and show decrypted notifications as local alerts:
-
-```kotlin
-// Request permission before initialize
-val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-    requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 0)
-}
-
-lifecycleScope.launch {
-    client.initialize()
-    client.on { payload ->
-        val title = payload["title"] as? String ?: "Notification"
-        val body = payload["body"] as? String ?: "New notification"
-
-        val notification = NotificationCompat.Builder(context, CHANNEL_ID)
-            .setContentTitle(title)
-            .setContentText(body)
-            .setSmallIcon(R.drawable.ic_notification)
-            .build()
-        notificationManager.notify(System.currentTimeMillis().toInt(), notification)
-    }
-}
-```
-
-### Revoke or Rotate Device
-
-```kotlin
-lifecycleScope.launch {
-    // Revoke device (removes from relay and local storage)
-    client.revokeDevice()
-
-    // Rotate device keys (new keys, same identity)
-    client.rotateKeys()
-}
-```
-
----
-
-## Security Model
-
-- **Device registration** — Device signs once with the wallet; the signature binds the device to the identity.
-- **Notification encryption** — Kyber KEM for key agreement, HKDF for key derivation, AES-GCM for payload encryption.
-- **Relay** — Sees only encrypted payloads; no plaintext and no need for centralized user accounts.
-
----
-
-## FCM & Offline Wake-Up
-
-With `fcmToken` set (via `NoxyNetworkOptions` or `setFcmToken()`), the relay can send wake-up data messages when the app is backgrounded. Your app can then reconnect and fetch new notifications.
-
-**Without FCM token:** Online-only — notifications arrive while the app has an active gRPC connection.
-
-**With FCM token:** Online + offline — relay sends FCM data messages with `data["noxy"] == "wake"` to wake the app; call `handleWakeUpNotification()` to reconnect and fetch.
-
-```kotlin
-// 1. Get FCM token (FirebaseMessaging.getInstance().token)
-// 2. Set it on the client
-client.setFcmToken(token)
-
-// 3. In FirebaseMessagingService.onMessageReceived, for data messages:
-override fun onMessageReceived(message: RemoteMessage) {
-    val data = message.data ?: return
-    if (NoxyClient.isNoxyWakeUp(data)) {
-        CoroutineScope(Dispatchers.Default).launch {
-            val result = client.handleWakeUpNotification(data)
-            // Use result (NewData, NoData, Failed) for logging or WorkManager
-        }
-    }
-}
-```
+Delivery acknowledgements (`DecisionAck`) are sent automatically after each successfully decrypted decision when a decision id is available (`decision_id` / `decisionId` / `message_id` in the JSON, or the relay stream `message_id`).
 
 ---
 
@@ -227,18 +124,38 @@ override fun onMessageReceived(message: RemoteMessage) {
 | Method | Description |
 |--------|-------------|
 | `initialize()` | Load or create device, connect to relay, authenticate |
-| `on(handler)` | Subscribe to notifications; handler receives decrypted payload |
+| `on(handler)` | Subscribe to encrypted decisions; handler receives relay `message_id`, then decrypted `Map` (`decision`) |
+| `NoxyClient.resolveDecisionId(decision, relayMessageId?)` | Pick id for outcomes: `decision_id` / `decisionId` / `message_id` in JSON, else relay `message_id` |
+| `sendDecisionOutcome(decisionId, outcome, receivedAt?)` | Send approve/reject (`DecisionOutcome` in proto) |
+| `sendDecisionAck(decisionId, receivedAt?)` | Optional extra delivery ack (normally automatic after decrypt) |
 | `setFcmToken(token)` | Register FCM token for wake-up when backgrounded |
-| `handleWakeUpNotification(data?)` | Handle FCM wake-up: reconnect and fetch notifications |
+| `handleWakeUpNotification(data?)` | Reconnect decision stream after FCM wake |
 | `revokeDevice()` | Revoke device locally and on relay |
 | `rotateKeys()` | Rotate device keys locally and on relay |
 | `close()` | Disconnect from relay |
 
 ---
 
+## FCM & offline wake-up
+
+With `fcmToken` set (via `NoxyNetworkOptions` or `setFcmToken()`), the relay can send wake-up data messages when the app is backgrounded.
+
+```kotlin
+override fun onMessageReceived(message: RemoteMessage) {
+    val data = message.data ?: return
+    if (NoxyClient.isNoxyWakeUp(data)) {
+        lifecycleScope.launch {
+            client.handleWakeUpNotification(data)
+        }
+    }
+}
+```
+
+---
+
 ## Proto & gRPC
 
-The network layer uses gRPC with generated client from `noxy.device.proto`. Proto files are in `noxy-sdk/src/main/proto/`. Code is generated automatically by the protobuf Gradle plugin during build.
+The network layer uses gRPC with generated clients from `noxy/device/noxy.device.proto` (aligned with the iOS SDK). Code is generated by the protobuf Gradle plugin during build.
 
 ---
 
