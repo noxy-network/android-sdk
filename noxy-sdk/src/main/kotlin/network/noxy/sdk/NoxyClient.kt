@@ -54,34 +54,47 @@ class NoxyClient(
     }
 
     /**
-     * Initialize: load or create device, connect to network, authenticate.
+     * Initialize: load or create device, connect to network (reconnect loop + first auth/announce).
      */
     suspend fun initialize() = withContext(Dispatchers.IO) {
-        networkModule.connect()
-
-        var device = deviceModule.load(identity.address, networkOptions.appId)
-        if (device == null) {
-            device = deviceModule.register(
+        deviceModule.load(identity.address, networkOptions.appId)
+            ?: deviceModule.register(
                 appId = networkOptions.appId,
                 identityId = identity.address,
                 identitySigner = identity.signer
             )
-        }
 
-        val dev = device ?: throw NoxyError.InitializationFailed("No device")
+        networkModule.setSessionRestore { restoreRelaySession() }
+        networkModule.connect()
+    }
 
-        val requiresRegistration = networkModule.authenticateDevice(dev)
+    /** Runs after each new gRPC transport: authenticate, register if needed, re-subscribe when [on] was used. */
+    private suspend fun restoreRelaySession() {
+        val device = deviceModule.load(identity.address, networkOptions.appId)
+            ?: throw NoxyError.InitializationFailed("No device")
+        if (device.isRevoked == true) throw NoxyError.InitializationFailed("No device")
+
+        val requiresRegistration = networkModule.authenticateDevice(device)
 
         if (requiresRegistration) {
-            val sig = dev.identitySignature
+            val sig = device.identitySignature
                 ?: throw NoxyError.InitializationFailed("Device has no identity signature for relay registration")
             networkModule.announceDevice(
-                devicePubkeys = dev.publicKey to dev.pqPublicKey,
-                walletAddress = dev.identityId,
+                devicePubkeys = device.publicKey to device.pqPublicKey,
+                walletAddress = device.identityId,
                 signature = sig,
                 fcmToken = effectiveFcmToken
             )
         }
+
+        val h = decisionHandler ?: return
+        deviceModule.loadDevicePrivateKeys()
+        networkModule.subscribeToDecisions(
+            fcmToken = effectiveFcmToken,
+            handler = { envelope, relayMessageId ->
+                deliverDecision(envelope, relayMessageId, h)
+            }
+        )
     }
 
     /**
@@ -203,41 +216,9 @@ class NoxyClient(
         }
 
     private suspend fun performWakeUpFetch(): NoxyWakeUpResult {
-        val handler = decisionHandler ?: return NoxyWakeUpResult.NoData
-
-        if (networkModule.isConnected) {
-            networkModule.disconnectForReconnect()
-        }
-        val device = deviceModule.load(identity.address, networkOptions.appId)
-            ?: return NoxyWakeUpResult.NoData
-        if (device.isRevoked == true) return NoxyWakeUpResult.NoData
-
-        deviceModule.loadDevicePrivateKeys()
-
-        val maxAttempts = 3
-        for (attempt in 1..maxAttempts) {
-            try {
-                networkModule.connect()
-                if (!networkModule.isConnected) throw Exception("Connection not established")
-                networkModule.authenticateDevice(device)
-                networkModule.subscribeToDecisions(
-                    fcmToken = effectiveFcmToken,
-                    handler = { envelope, relayMessageId ->
-                        deliverDecision(envelope, relayMessageId, handler)
-                    }
-                )
-                kotlinx.coroutines.delay(20_000)
-                return NoxyWakeUpResult.NewData
-            } catch (_: Exception) {
-                if (attempt < maxAttempts) {
-                    networkModule.disconnectForReconnect()
-                    kotlinx.coroutines.delay(500)
-                } else {
-                    return NoxyWakeUpResult.Failed
-                }
-            }
-        }
-        return NoxyWakeUpResult.Failed
+        if (decisionHandler == null) return NoxyWakeUpResult.NoData
+        networkModule.disconnectForReconnect()
+        return NoxyWakeUpResult.NewData
     }
 
     /**

@@ -4,9 +4,15 @@ import com.google.protobuf.ByteString
 import io.grpc.ManagedChannel
 import io.grpc.okhttp.OkHttpChannelBuilder
 import io.grpc.stub.StreamObserver
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -24,6 +30,8 @@ import noxy.device.SubscribeDecisions
 import java.net.URL
 import java.util.UUID
 import java.util.concurrent.TimeUnit
+import kotlin.math.min
+import kotlin.math.pow
 
 /**
  * Network module: gRPC-based relay communication via bidirectional HandleMessage stream.
@@ -48,9 +56,27 @@ class NoxyNetworkModule(
     private val pendingRequests = mutableMapOf<String, kotlinx.coroutines.CompletableDeferred<DeviceResponse>>()
     private val pendingMutex = Mutex()
     private val connectionMutex = Mutex()
+    private val transportMutex = Mutex()
 
     @Volatile
     private var decisionHandler: (suspend (NoxyEncryptedDecision, String?) -> Unit)? = null
+
+    /** Runs after each new transport (initial connect and every reconnect). */
+    private var sessionRestore: (suspend () -> Unit)? = null
+
+    @Volatile
+    private var userInitiatedDisconnect = false
+
+    private var maintainSupervisor: Job? = null
+    private var maintainJob: Job? = null
+    private var firstConnectDeferred: CompletableDeferred<Unit>? = null
+
+    @Volatile
+    private var streamEndedSignal: CompletableDeferred<Unit>? = null
+
+    fun setSessionRestore(handler: (suspend () -> Unit)?) {
+        sessionRestore = handler
+    }
 
     val isConnected: Boolean get() = channel != null
     val isReady: Boolean get() = isConnected && sessionId != null && networkDeviceId != null
@@ -67,34 +93,120 @@ class NoxyNetworkModule(
         return host to port
     }
 
-    /** Connect to relay. Waits for any in-progress disconnect to finish (avoids race conditions). */
-    suspend fun connect() = connectionMutex.withLock {
-        withContext(Dispatchers.IO) {
-            val (host, port) = parseRelayURL(options.relayUrl)
-            val builder = OkHttpChannelBuilder.forAddress(host, port)
-                .useTransportSecurity()
+    /**
+     * Connect to relay and start the reconnect loop until [disconnect].
+     * Suspends until the first successful [sessionRestore] (or fails if [disconnect] happens while waiting).
+     */
+    suspend fun connect() {
+        val waitFirst = connectionMutex.withLock {
+            if (maintainJob?.isActive == true) return@withLock null
+            userInitiatedDisconnect = false
+            val d = CompletableDeferred<Unit>()
+            firstConnectDeferred = d
+            val sup = SupervisorJob()
+            maintainSupervisor = sup
+            val coroutineScope = CoroutineScope(sup + Dispatchers.Default)
+            maintainJob = coroutineScope.launch {
+                try {
+                    reconnectLoop()
+                } catch (_: CancellationException) {
+                    // expected when disconnect() cancels the supervisor
+                }
+            }
+            d
+        }
+        waitFirst?.await()
+    }
 
-            channel = builder.build()
-            val stub = DeviceServiceGrpc.newStub(channel).withWaitForReady()
+    /**
+     * Infinite reconnect: backoff only after failed open or failed session restore; immediate retry after the
+     * response stream ends cleanly or with error. Delay: min(2^(failureStreak-1) seconds, 30s).
+     */
+    private suspend fun reconnectLoop() {
+        var failureStreak = 0
+        var didCompleteFirstRestore = false
 
-            requestStream = stub.handleMessage(object : StreamObserver<DeviceResponse> {
-                override fun onNext(value: DeviceResponse) {
-                    scope.launch {
-                        handleResponse(value)
+        while (!userInitiatedDisconnect && currentCoroutineContext().isActive) {
+            if (failureStreak > 0) {
+                val delaySec = min(2.0.pow(failureStreak - 1), 30.0)
+                try {
+                    delay((delaySec * 1000).toLong())
+                } catch (_: CancellationException) {
+                    return
+                }
+            }
+            if (userInitiatedDisconnect || !currentCoroutineContext().isActive) return
+
+            try {
+                openTransportAndStream()
+                sessionRestore?.invoke()
+
+                failureStreak = 0
+
+                if (!didCompleteFirstRestore) {
+                    didCompleteFirstRestore = true
+                    connectionMutex.withLock {
+                        firstConnectDeferred?.complete(Unit)
+                        firstConnectDeferred = null
                     }
                 }
 
-                override fun onError(t: Throwable) {
-                    scope.launch {
-                        pendingMutex.withLock {
-                            pendingRequests.values.forEach { it.completeExceptionally(t) }
-                            pendingRequests.clear()
+                waitForResponseStreamToComplete()
+
+                if (userInitiatedDisconnect || !currentCoroutineContext().isActive) return
+
+                teardownTransportForReconnect()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Throwable) {
+                if (userInitiatedDisconnect || !currentCoroutineContext().isActive) return
+                failureStreak++
+                teardownTransportForReconnect()
+            }
+        }
+    }
+
+    private suspend fun openTransportAndStream() {
+        transportMutex.withLock {
+            withContext(Dispatchers.IO) {
+                val (host, port) = parseRelayURL(options.relayUrl)
+                val builder = OkHttpChannelBuilder.forAddress(host, port)
+                    .useTransportSecurity()
+
+                val ch = builder.build()
+                val streamSignal = CompletableDeferred<Unit>()
+                streamEndedSignal = streamSignal
+
+                val stub = DeviceServiceGrpc.newStub(ch).withWaitForReady()
+
+                val stream = stub.handleMessage(object : StreamObserver<DeviceResponse> {
+                    override fun onNext(value: DeviceResponse) {
+                        scope.launch {
+                            handleResponse(value)
                         }
                     }
-                }
 
-                override fun onCompleted() {}
-            })
+                    override fun onError(t: Throwable) {
+                        streamSignal.complete(Unit)
+                    }
+
+                    override fun onCompleted() {
+                        streamSignal.complete(Unit)
+                    }
+                })
+
+                channel = ch
+                requestStream = stream
+            }
+        }
+    }
+
+    private suspend fun waitForResponseStreamToComplete() {
+        val signal = streamEndedSignal ?: return
+        try {
+            signal.await()
+        } catch (e: CancellationException) {
+            throw e
         }
     }
 
@@ -176,27 +288,82 @@ class NoxyNetworkModule(
         deferred.await()
     }
 
-    suspend fun disconnect() = connectionMutex.withLock {
-        withContext(Dispatchers.IO) { performDisconnect(timeoutSeconds = 5) }
-    }
-
-    /** Quick disconnect for wake-up reconnect; short timeout to re-establish connection ASAP. */
-    suspend fun disconnectForReconnect() = connectionMutex.withLock {
-        withContext(Dispatchers.IO) { performDisconnect(timeoutSeconds = 1) }
-    }
-
-    private suspend fun performDisconnect(timeoutSeconds: Long) = withContext(Dispatchers.IO) {
-        pendingMutex.withLock {
-            pendingRequests.values.forEach { it.completeExceptionally(NoxyError.General("Disconnected")) }
-            pendingRequests.clear()
+    suspend fun disconnect() {
+        val sup: Job?
+        val job: Job?
+        connectionMutex.withLock {
+            userInitiatedDisconnect = true
+            firstConnectDeferred?.completeExceptionally(NoxyError.General("Disconnected"))
+            firstConnectDeferred = null
+            job = maintainJob
+            sup = maintainSupervisor
+            maintainJob = null
+            maintainSupervisor = null
         }
-        requestStream?.onCompleted()
-        requestStream = null
-        channel?.shutdown()?.awaitTermination(timeoutSeconds, TimeUnit.SECONDS)
-        channel = null
-        sessionId = null
-        networkDeviceId = null
-        decisionHandler = null
+        sup?.cancel()
+        if (job != null) job.join()
+        performFullDisconnect()
+    }
+
+    /** Drop the current transport so the reconnect loop reconnects; does not stop the loop or clear handlers. */
+    suspend fun disconnectForReconnect() {
+        teardownTransportForReconnect()
+    }
+
+    private suspend fun teardownTransportForReconnect() {
+        transportMutex.withLock {
+            withContext(Dispatchers.IO) {
+                pendingMutex.withLock {
+                    pendingRequests.values.forEach {
+                        it.completeExceptionally(NoxyError.General("Reconnecting"))
+                    }
+                    pendingRequests.clear()
+                }
+                try {
+                    requestStream?.onCompleted()
+                } catch (_: Exception) {
+                }
+                requestStream = null
+                try {
+                    channel?.shutdown()?.awaitTermination(1, TimeUnit.SECONDS)
+                } catch (_: Exception) {
+                }
+                channel = null
+                sessionId = null
+                networkDeviceId = null
+            }
+            streamEndedSignal = null
+        }
+    }
+
+    private suspend fun performFullDisconnect() {
+        transportMutex.withLock {
+            withContext(Dispatchers.IO) {
+                pendingMutex.withLock {
+                    pendingRequests.values.forEach {
+                        it.completeExceptionally(NoxyError.General("Disconnected"))
+                    }
+                    pendingRequests.clear()
+                }
+                try {
+                    requestStream?.onCompleted()
+                } catch (_: Exception) {
+                }
+                requestStream = null
+                try {
+                    channel?.shutdown()?.awaitTermination(5, TimeUnit.SECONDS)
+                } catch (_: Exception) {
+                }
+                channel = null
+                sessionId = null
+                networkDeviceId = null
+                decisionHandler = null
+            }
+            streamEndedSignal = null
+        }
+        connectionMutex.withLock {
+            userInitiatedDisconnect = false
+        }
     }
 
     /**
