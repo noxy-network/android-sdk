@@ -1,12 +1,24 @@
 package network.noxy.sdk.identity
 
+import noxy.device.IdentityType
+
 /**
  * EVM-style wallet address (0x...)
  */
 typealias WalletAddress = String
 
 /**
- * Supported identity types
+ * Relay-facing identity category (`wallet` | `email` | `phone` | `user_id`).
+ */
+enum class NoxyRelayIdentityType {
+    WALLET,
+    EMAIL,
+    PHONE,
+    USER_ID
+}
+
+/**
+ * Wallet implementation kind (EOA vs SCW). Only applies to wallet relay identities.
  */
 enum class NoxyIdentityType {
     EOA,
@@ -106,22 +118,51 @@ data class NoxyScwWalletIdentity(
 }
 
 /**
- * Union of supported identity types
+ * Union of supported identities for the relay (wallet plus logical ids).
  */
 sealed class NoxyIdentity {
-    abstract val address: WalletAddress
-    abstract val signer: SignerClosure
-    abstract val type: NoxyIdentityType
 
-    data class Eoa(val identity: NoxyEoaWalletIdentity) : NoxyIdentity() {
-        override val address: WalletAddress get() = identity.address
-        override val signer: SignerClosure get() = identity.signer
-        override val type: NoxyIdentityType get() = NoxyIdentityType.EOA
+    data class Eoa(val identity: NoxyEoaWalletIdentity) : NoxyIdentity()
+
+    data class Scw(val identity: NoxyScwWalletIdentity) : NoxyIdentity()
+
+    data class Email(val email: String) : NoxyIdentity()
+
+    data class Phone(val phone: String) : NoxyIdentity()
+
+    data class UserId(val userId: String) : NoxyIdentity()
+}
+
+/** Only defined when [relayIdentityTypeOf] is [NoxyRelayIdentityType.WALLET]. */
+val NoxyIdentity.walletAddress: WalletAddress
+    get() = when (this) {
+        is NoxyIdentity.Eoa -> identity.address
+        is NoxyIdentity.Scw -> identity.address
+        else -> error("walletAddress is only available when identity is Eoa or Scw")
     }
 
-    data class Scw(val identity: NoxyScwWalletIdentity) : NoxyIdentity() {
-        override val address: WalletAddress get() = identity.address
-        override val signer: SignerClosure get() = identity.signer
-        override val type: NoxyIdentityType get() = NoxyIdentityType.SCW
-    }
+@Deprecated("Use walletAddress for wallet identities", ReplaceWith("walletAddress"))
+val NoxyIdentity.address: WalletAddress
+    get() = walletAddress
+
+fun relayIdentityTypeOf(identity: NoxyIdentity): NoxyRelayIdentityType = when (identity) {
+    is NoxyIdentity.Eoa, is NoxyIdentity.Scw -> NoxyRelayIdentityType.WALLET
+    is NoxyIdentity.Email -> NoxyRelayIdentityType.EMAIL
+    is NoxyIdentity.Phone -> NoxyRelayIdentityType.PHONE
+    is NoxyIdentity.UserId -> NoxyRelayIdentityType.USER_ID
+}
+
+fun logicalIdentityIdOf(identity: NoxyIdentity): String = when (identity) {
+    is NoxyIdentity.Eoa -> identity.identity.address
+    is NoxyIdentity.Scw -> identity.identity.address
+    is NoxyIdentity.Email -> identity.email
+    is NoxyIdentity.Phone -> identity.phone
+    is NoxyIdentity.UserId -> identity.userId
+}
+
+fun NoxyRelayIdentityType.toProtoIdentityType(): IdentityType = when (this) {
+    NoxyRelayIdentityType.WALLET -> IdentityType.IDENTITY_TYPE_WALLET
+    NoxyRelayIdentityType.EMAIL -> IdentityType.IDENTITY_TYPE_EMAIL
+    NoxyRelayIdentityType.PHONE -> IdentityType.IDENTITY_TYPE_PHONE
+    NoxyRelayIdentityType.USER_ID -> IdentityType.IDENTITY_TYPE_USER_ID
 }

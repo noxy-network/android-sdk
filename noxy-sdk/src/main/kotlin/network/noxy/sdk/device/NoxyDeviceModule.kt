@@ -2,9 +2,12 @@ package network.noxy.sdk.device
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import network.noxy.sdk.crypto.NoxyDeviceRegistrationMac
 import network.noxy.sdk.crypto.NoxyKyberProvider
-import network.noxy.sdk.identity.SignerClosure
-import network.noxy.sdk.identity.WalletAddress
+import network.noxy.sdk.identity.NoxyIdentity
+import network.noxy.sdk.identity.NoxyRelayIdentityType
+import network.noxy.sdk.identity.logicalIdentityIdOf
+import network.noxy.sdk.identity.relayIdentityTypeOf
 import network.noxy.sdk.storage.NoxyStorage
 import org.bouncycastle.crypto.AsymmetricCipherKeyPair
 import org.bouncycastle.crypto.generators.Ed25519KeyPairGenerator
@@ -42,7 +45,7 @@ class NoxyDeviceModule(
     val device: NoxyDevice? get() = currentDevice
 
     private fun storageKey(device: NoxyDevice) = "${device.appId}_${device.identityId}"
-    private fun devicesKey(identityId: WalletAddress) = "devices_$identityId"
+    private fun devicesKey(identityId: String) = "devices_$identityId"
 
     /**
      * Build hash for identity signature (keccak256 for relay verification).
@@ -71,7 +74,7 @@ class NoxyDeviceModule(
     /**
      * Load device for identity
      */
-    suspend fun load(identityId: WalletAddress, appId: String? = null): NoxyDevice? = withContext(Dispatchers.IO) {
+    suspend fun load(identityId: String, appId: String? = null): NoxyDevice? = withContext(Dispatchers.IO) {
         val key = devicesKey(identityId)
         val data = storage.load(key) ?: return@withContext null
         val devicesArray = JSONArray(String(data, Charsets.UTF_8))
@@ -92,16 +95,20 @@ class NoxyDeviceModule(
      */
     suspend fun register(
         appId: String,
-        identityId: WalletAddress,
-        identitySigner: SignerClosure?
+        identity: NoxyIdentity,
+        appSigningSecret: String,
     ): NoxyDevice = withContext(Dispatchers.IO) {
         val (edKeys, pqKeys) = generateKeys()
         val (edPub, edPriv) = edKeys
         val (pqPub, pqPriv) = pqKeys
         val issuedAt = System.currentTimeMillis()
 
+        val logicalId = logicalIdentityIdOf(identity)
+        val relayType = relayIdentityTypeOf(identity)
+
         var device = NoxyDevice(
-            identityId = identityId,
+            identityId = logicalId,
+            relayIdentityType = relayType,
             appId = appId,
             isRevoked = false,
             issuedAt = issuedAt,
@@ -110,11 +117,16 @@ class NoxyDeviceModule(
             identitySignature = null
         )
 
-        val hash = buildIdentitySignatureHash(device)
-        if (identitySigner != null) {
-            val sig = identitySigner(hash)
-            device = device.copy(identitySignature = sig.bytes)
-        }
+        val mac = NoxyDeviceRegistrationMac.sign(
+            secret = appSigningSecret,
+            appId = appId,
+            identityTypeWire = relayType.toStoredKey(),
+            logicalIdentityId = logicalId,
+            publicKey = edPub,
+            pqPublicKey = pqPub,
+            deviceType = "android",
+        )
+        device = device.copy(identitySignature = mac)
 
         currentDevice = device
         persistDevice(device)
@@ -220,8 +232,24 @@ private fun keccak256(input: ByteArray): ByteArray {
     return digest.digest()
 }
 
+private fun NoxyRelayIdentityType.toStoredKey(): String = when (this) {
+    NoxyRelayIdentityType.WALLET -> "wallet"
+    NoxyRelayIdentityType.EMAIL -> "email"
+    NoxyRelayIdentityType.PHONE -> "phone"
+    NoxyRelayIdentityType.USER_ID -> "user_id"
+}
+
+private fun relayIdentityTypeFromStored(raw: String?): NoxyRelayIdentityType =
+    when (raw?.lowercase()) {
+        "email" -> NoxyRelayIdentityType.EMAIL
+        "phone" -> NoxyRelayIdentityType.PHONE
+        "user_id", "userid" -> NoxyRelayIdentityType.USER_ID
+        else -> NoxyRelayIdentityType.WALLET
+    }
+
 private fun JSONObject.toDevice() = NoxyDevice(
     identityId = getString("identityId"),
+    relayIdentityType = relayIdentityTypeFromStored(optString("relayIdentityType")),
     appId = getString("appId"),
     isRevoked = optBoolean("isRevoked"),
     issuedAt = getLong("issuedAt"),
@@ -232,6 +260,7 @@ private fun JSONObject.toDevice() = NoxyDevice(
 
 private fun NoxyDevice.toJson() = JSONObject().apply {
     put("identityId", identityId)
+    put("relayIdentityType", relayIdentityType.toStoredKey())
     put("appId", appId)
     put("isRevoked", isRevoked)
     put("issuedAt", issuedAt)

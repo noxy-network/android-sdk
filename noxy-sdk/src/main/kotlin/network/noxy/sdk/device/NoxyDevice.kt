@@ -1,12 +1,14 @@
 package network.noxy.sdk.device
 
-import network.noxy.sdk.identity.WalletAddress
+import network.noxy.sdk.identity.NoxyRelayIdentityType
 
 /**
  * Device descriptor and public keys
  */
 data class NoxyDevice(
-    val identityId: WalletAddress,
+    /** Logical identity id (wallet address or opaque id), aligned with relay `identity_id` / `wallet_address`. */
+    val identityId: String,
+    val relayIdentityType: NoxyRelayIdentityType,
     val appId: String,
     var isRevoked: Boolean,
     val issuedAt: Long,
@@ -19,6 +21,7 @@ data class NoxyDevice(
         if (javaClass != other?.javaClass) return false
         other as NoxyDevice
         return identityId == other.identityId &&
+            relayIdentityType == other.relayIdentityType &&
             appId == other.appId &&
             isRevoked == other.isRevoked &&
             issuedAt == other.issuedAt &&
@@ -29,6 +32,7 @@ data class NoxyDevice(
 
     override fun hashCode(): Int {
         var result = identityId.hashCode()
+        result = 31 * result + relayIdentityType.hashCode()
         result = 31 * result + appId.hashCode()
         result = 31 * result + isRevoked.hashCode()
         result = 31 * result + issuedAt.hashCode()

@@ -9,6 +9,8 @@ import network.noxy.sdk.decision.NoxyDecisionCryptoModule
 import network.noxy.sdk.device.NoxyDeviceModule
 import network.noxy.sdk.identity.NoxyIdentity
 import network.noxy.sdk.identity.WalletAddress
+import network.noxy.sdk.identity.logicalIdentityIdOf
+import network.noxy.sdk.identity.walletAddress
 import network.noxy.sdk.network.NoxyDecisionChoice
 import network.noxy.sdk.network.NoxyEncryptedDecision
 import network.noxy.sdk.network.NoxyNetworkModule
@@ -41,7 +43,10 @@ class NoxyClient(
     private val effectiveFcmToken: String?
         get() = fcmToken?.takeIf { it.isNotEmpty() } ?: networkOptions.fcmToken
 
-    val address: WalletAddress get() = identity.address
+    val logicalIdentityId: String get() = logicalIdentityIdOf(identity)
+
+    /** Wallet address when identity is EOA or SCW; otherwise unavailable at compile time — use [logicalIdentityId]. */
+    val address: WalletAddress get() = identity.walletAddress
     val isDeviceActive: Boolean get() = deviceModule.isRevoked != true
     val isRelayConnected: Boolean get() = networkModule.isConnected
     val isNetworkReady: Boolean get() = networkModule.isReady
@@ -57,11 +62,12 @@ class NoxyClient(
      * Initialize: load or create device, connect to network (reconnect loop + first auth/announce).
      */
     suspend fun initialize() = withContext(Dispatchers.IO) {
-        deviceModule.load(identity.address, networkOptions.appId)
+        val lid = logicalIdentityIdOf(identity)
+        deviceModule.load(lid, networkOptions.appId)
             ?: deviceModule.register(
                 appId = networkOptions.appId,
-                identityId = identity.address,
-                identitySigner = identity.signer
+                identity = identity,
+                appSigningSecret = networkOptions.appSigningSecret,
             )
 
         networkModule.setSessionRestore { restoreRelaySession() }
@@ -70,18 +76,16 @@ class NoxyClient(
 
     /** Runs after each new gRPC transport: authenticate, register if needed, re-subscribe when [on] was used. */
     private suspend fun restoreRelaySession() {
-        val device = deviceModule.load(identity.address, networkOptions.appId)
+        val device = deviceModule.load(logicalIdentityIdOf(identity), networkOptions.appId)
             ?: throw NoxyError.InitializationFailed("No device")
         if (device.isRevoked == true) throw NoxyError.InitializationFailed("No device")
 
         val requiresRegistration = networkModule.authenticateDevice(device)
 
         if (requiresRegistration) {
-            val sig = device.identitySignature
-                ?: throw NoxyError.InitializationFailed("Device has no identity signature for relay registration")
-            networkModule.announceDevice(
-                devicePubkeys = device.publicKey to device.pqPublicKey,
-                walletAddress = device.identityId,
+            val sig = device.identitySignature ?: ByteArray(0)
+            networkModule.announceRegister(
+                device = device,
                 signature = sig,
                 fcmToken = effectiveFcmToken
             )
@@ -104,7 +108,7 @@ class NoxyClient(
         val sig = deviceModule.getDeviceSignature()
             ?: throw NoxyError.General("Unable to revoke device")
         deviceModule.revoke()
-        networkModule.revokeDevice(walletAddress = address, signature = sig)
+        networkModule.revokeDevice(logicalIdentityId = logicalIdentityIdOf(identity), signature = sig)
     }
 
     /**
@@ -116,9 +120,10 @@ class NoxyClient(
         deviceModule.rotateKeys()
         val pk = deviceModule.publicKey ?: throw NoxyError.General("Unable to rotate device keys")
         val pqPk = deviceModule.pqPublicKey ?: throw NoxyError.General("Unable to rotate device keys")
+        val device = deviceModule.device ?: throw NoxyError.General("Unable to rotate device keys")
         networkModule.rotateDeviceKeys(
+            device = device,
             newPubkeys = pk to pqPk,
-            walletAddress = address,
             signature = sig
         )
     }

@@ -18,7 +18,11 @@ import network.noxy.sdk.storage.NoxyStorage
  * val client = createNoxyClient(
  *     context = context,
  *     identity = identity,
- *     network = NoxyNetworkOptions(appId = "your-app", relayUrl = "https://relay.noxy.network")
+ *     network = NoxyNetworkOptions(
+ *         appId = "your-app",
+ *         relayUrl = "https://relay.noxy.network",
+ *         appSigningSecret = "your-app-signing-secret",
+ *     )
  * )
  * client.initialize()
  * client.on { relayMessageId, decision -> ... }

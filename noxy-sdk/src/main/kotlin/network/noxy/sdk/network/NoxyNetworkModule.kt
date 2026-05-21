@@ -19,7 +19,8 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import network.noxy.sdk.NoxyError
 import network.noxy.sdk.device.NoxyDevice
-import network.noxy.sdk.identity.WalletAddress
+import network.noxy.sdk.identity.NoxyRelayIdentityType
+import network.noxy.sdk.identity.toProtoIdentityType
 import noxy.device.DecisionAck
 import noxy.device.DecisionOutcome
 import noxy.device.DecisionOutcomeValue
@@ -397,23 +398,28 @@ class NoxyNetworkModule(
     }
 
     /**
-     * Announce (register) device with relay
+     * Register device with relay (announce), including wallet vs non-wallet identity fields.
      */
-    suspend fun announceDevice(
-        devicePubkeys: Pair<ByteArray, ByteArray>,
-        walletAddress: WalletAddress,
+    suspend fun announceRegister(
+        device: NoxyDevice,
         signature: ByteArray,
         fcmToken: String? = null
     ) = withContext(Dispatchers.IO) {
         val regBuilder = noxy.device.RegisterDevice.newBuilder()
             .setDevicePubkeys(
                 noxy.device.DevicePublicKeys.newBuilder()
-                    .setPublicKey(ByteString.copyFrom(devicePubkeys.first))
-                    .setPqPublicKey(ByteString.copyFrom(devicePubkeys.second))
+                    .setPublicKey(ByteString.copyFrom(device.publicKey))
+                    .setPqPublicKey(ByteString.copyFrom(device.pqPublicKey))
             )
-            .setWalletAddress(walletAddress)
             .setSignature(ByteString.copyFrom(signature))
             .setType("android")
+            .setIdentityType(device.relayIdentityType.toProtoIdentityType())
+
+        when (device.relayIdentityType) {
+            NoxyRelayIdentityType.WALLET -> regBuilder.setWalletAddress(device.identityId)
+            else -> regBuilder.setIdentityId(device.identityId)
+        }
+
         if (!fcmToken.isNullOrEmpty()) regBuilder.setFcmToken(fcmToken)
 
         val req = DeviceRequest.newBuilder()
@@ -433,13 +439,13 @@ class NoxyNetworkModule(
     }
 
     /**
-     * Revoke device on relay
+     * Revoke device on relay. [logicalIdentityId] is sent in the `wallet_address` proto field (semantic logical id).
      */
-    suspend fun revokeDevice(walletAddress: WalletAddress, signature: ByteArray) = withContext(Dispatchers.IO) {
+    suspend fun revokeDevice(logicalIdentityId: String, signature: ByteArray) = withContext(Dispatchers.IO) {
         val req = DeviceRequest.newBuilder()
             .setRevokeDevice(
                 noxy.device.RevokeDevice.newBuilder()
-                    .setWalletAddress(walletAddress)
+                    .setWalletAddress(logicalIdentityId)
                     .setSignature(ByteString.copyFrom(signature))
             )
             .build()
@@ -450,21 +456,26 @@ class NoxyNetworkModule(
      * Rotate device keys on relay
      */
     suspend fun rotateDeviceKeys(
+        device: NoxyDevice,
         newPubkeys: Pair<ByteArray, ByteArray>,
-        walletAddress: WalletAddress,
         signature: ByteArray
     ) = withContext(Dispatchers.IO) {
-        val req = DeviceRequest.newBuilder()
-            .setRotateDeviceKeys(
-                noxy.device.RotateDeviceKeys.newBuilder()
-                    .setNewPubkeys(
-                        noxy.device.DevicePublicKeys.newBuilder()
-                            .setPublicKey(ByteString.copyFrom(newPubkeys.first))
-                            .setPqPublicKey(ByteString.copyFrom(newPubkeys.second))
-                    )
-                    .setWalletAddress(walletAddress)
-                    .setSignature(ByteString.copyFrom(signature))
+        val rot = noxy.device.RotateDeviceKeys.newBuilder()
+            .setNewPubkeys(
+                noxy.device.DevicePublicKeys.newBuilder()
+                    .setPublicKey(ByteString.copyFrom(newPubkeys.first))
+                    .setPqPublicKey(ByteString.copyFrom(newPubkeys.second))
             )
+            .setSignature(ByteString.copyFrom(signature))
+            .setIdentityType(device.relayIdentityType.toProtoIdentityType())
+
+        when (device.relayIdentityType) {
+            NoxyRelayIdentityType.WALLET -> rot.setWalletAddress(device.identityId)
+            else -> rot.setIdentityId(device.identityId)
+        }
+
+        val req = DeviceRequest.newBuilder()
+            .setRotateDeviceKeys(rot)
             .build()
         sendAndWait(req)
     }

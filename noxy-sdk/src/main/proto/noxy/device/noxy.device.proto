@@ -23,15 +23,11 @@ message DeviceRequest {
     SubscribeDecisions subscribe_decisions = 9;
     RevokeDevice revoke_device = 10;
     RotateDeviceKeys rotate_device_keys = 11;
-    // User tapped Approve or Reject in the client UI (human decision).
     DecisionOutcome decision_outcome = 12;
-    // Device received and decrypted the relay's decision request (delivery receipt only; not the user's choice).
-    DecisionAck decision_ack = 13;
+    DecisionAck decision_ack = 13; // delivery (not decision) ack
   }
 }
 
-// Tells the relay this device received the encrypted decision request (decrypt succeeded).
-// This is not the user's approve/reject — use DecisionOutcome for that.
 message DecisionAck {
   string decision_id = 1;
   uint64 received_at = 2;
@@ -41,13 +37,25 @@ message Authenticate {
   DevicePublicKeys device_pubkeys = 1;
 }
 
+enum IdentityType {
+  IDENTITY_TYPE_WALLET = 0;
+  IDENTITY_TYPE_EMAIL = 1;
+  IDENTITY_TYPE_PHONE = 2;
+  IDENTITY_TYPE_USER_ID = 3;
+}
+
 message RegisterDevice {
   DevicePublicKeys device_pubkeys = 1;
-  string wallet_address = 2;
+  /// Fallback when identity_id is omitted or empty (e.g. legacy wallet flows).
+  optional string wallet_address = 2;
+  /// When the app has **APP_SIGNING_SECRET** configured (dashboard): HMAC-SHA256 over the canonical registration payload (relay docs).
   bytes signature = 3;
   optional string apn_token = 4;   // Apple APNs token for waking iOS when offline
   optional string fcm_token = 5;   // Google FCM token for waking Android when offline
   string type = 6;  // required: browser, desktop, ios, android, telegram
+  IdentityType identity_type = 7;
+  /// Primary logical identity id when set; otherwise wallet_address must be set.
+  string identity_id = 8;
 }
 
 message DevicePublicKeys {
@@ -68,11 +76,12 @@ message RevokeDevice {
 
 message RotateDeviceKeys {
   DevicePublicKeys new_pubkeys = 1;
-  string wallet_address = 2;
+  optional string wallet_address = 2;
   bytes signature = 3;
+  IdentityType identity_type = 4;
+  string identity_id = 5;
 }
 
-// User's response to a decision request: Approve or Reject (sent after the user acts in the UI).
 message DecisionOutcome {
   string decision_id = 1;
   DecisionOutcomeValue outcome = 2;

@@ -1,20 +1,61 @@
 # 📦 @noxy-network/android-sdk
 
-Android SDK to integrate with the [Noxy](https://noxy.network) **Decision Layer**: subscribe to encrypted decision requests, present them to the user, and respond with decision — all with wallet-based identity.
+Android SDK for [Noxy](https://noxy.network).
 
-Users register a device once with a wallet signature. The relay streams encrypted decision payloads; the SDK decrypts them locally and can send `DecisionOutcome` back over the same gRPC session.
+## What is Noxy?
 
-**Before you integrate:** Create your app at [noxy.network](https://noxy.network). When the app is created, you receive an **app id** and an **app token** (auth token). This Android SDK uses the **app id** (`appId` in `NoxyNetworkOptions`). The **app token** is for agent/orchestrator SDKs (Go, Rust, Python, Node, etc.), not for this package.
+[Noxy](https://noxy.network) adds **human-in-the-loop** guardrails: encrypted prompts reach your app, the **user makes a decision**, and your app **sends the outcome** to the relay—plaintext prompts stay off the relay.
+
+Users register a device once using **`appSigningSecret`** (registration HMAC). This SDK decrypts payloads locally and sends **`DecisionOutcome`** over **gRPC**.
+
+## Before you integrate
+
+Create your app at [noxy.network](https://noxy.network). On the dashboard, copy **APP_ID** into **`appId`** and **APP_SIGNING_SECRET** into **`appSigningSecret`** in `NoxyNetworkOptions`. Device registration sends an HMAC derived from **APP_SIGNING_SECRET**. Agent backends use a separate **app token**, not these values.
 
 ---
 
 ## Features
 
-- **Wallet-based identity** — EOA and Smart Contract Wallets
-- **Encrypted decision events** — Kyber (post-quantum) + AES-GCM for payloads from the Decision Layer
-- **Subscribe / outcomes** — `SubscribeDecisions` on the relay; `sendDecisionOutcome` for approve/reject
-- **Optional FCM wake-up** — Reconnect when the app is backgrounded (`setFcmToken`, `handleWakeUpNotification`)
-- **Secure storage** — EncryptedSharedPreferences backed by Android Keystore for device data and private keys
+- **Human-in-the-loop payloads** — Kyber (post-quantum) + AES-GCM for encrypted prompts from the relay.
+- **Relay identities** — **`wallet`**, **`email`**, **`phone`**, **`user_id`** — see [Relay identity types](#relay-identity-types).
+- **Subscribe / outcomes** — `SubscribeDecisions` on the relay; `sendDecisionOutcome` to publish the user’s outcome.
+- **Optional FCM wake-up** — Reconnect when the app is backgrounded (`setFcmToken`, `handleWakeUpNotification`).
+- **Secure storage** — EncryptedSharedPreferences backed by Android Keystore for device data and private keys.
+
+---
+
+## Relay identity types
+
+The relay **`identity_type`** values are **`wallet`**, **`email`**, **`phone`**, and **`user_id`**. In Kotlin use **`NoxyRelayIdentityType`** (`USER_ID` ↔ **`user_id`** on the wire). **`logicalIdentityIdOf(identity)`** returns the stable string key for storage and APIs.
+
+### Kotlin examples
+
+Non-wallet cases use **`NoxyIdentity.Email`** / **`Phone`** / **`UserId`** (no separate registration signer). **`logicalIdentityIdOf(identity)`** is the stable key; **`NoxyNetworkOptions.appSigningSecret`** supplies the registration HMAC for all identity kinds.
+
+```kotlin
+import network.noxy.sdk.identity.NoxyIdentity
+
+// Email (relay identity_type "email")
+val emailIdentity = NoxyIdentity.Email(email = "you@example.com")
+
+// Phone (relay identity_type "phone")
+val phoneIdentity = NoxyIdentity.Phone(phone = "+15551234567")
+
+// Opaque id (relay identity_type "user_id")
+val userIdIdentity = NoxyIdentity.UserId(userId = "internal-user-abc123")
+
+val client = createNoxyClient(
+    context,
+    userIdIdentity,
+    NoxyNetworkOptions(
+        appId = "…",
+        relayUrl = "https://relay.noxy.network",
+        appSigningSecret = "your-app-signing-secret",
+    ),
+)
+```
+
+Use **`client.logicalIdentityId`** for logging or UI; **`address`** / **`walletAddress`** are only valid for **`Eoa`** / **`Scw`**.
 
 ---
 
@@ -37,7 +78,7 @@ repositories {
 }
 
 dependencies {
-    implementation("network.noxy:android-sdk:2.0.1")
+    implementation("network.noxy:android-sdk:2.1.0")
 }
 ```
 
@@ -56,7 +97,7 @@ dependencies {
 
 ---
 
-## Quick Start
+## Quick start (wallet identity)
 
 ```kotlin
 import network.noxy.sdk.*
@@ -77,13 +118,12 @@ val client = createNoxyClient(
     network = NoxyNetworkOptions(
         appId = "your-app-id",
         relayUrl = "https://relay.noxy.network",
+        appSigningSecret = "your-app-signing-secret",
         fcmToken = fcmToken  // optional: enables wake-up when app is backgrounded
     )
 )
 
 client.setFcmToken(firebaseToken)
-
-var pendingDecisionId: String? = null
 
 lifecycleScope.launch {
     client.initialize()
@@ -91,22 +131,17 @@ lifecycleScope.launch {
 
 lifecycleScope.launch {
     client.on { relayMessageId, decision ->
-        val title = decision["title"] as? String
-        val summary = decision["summary"] as? String
         val decisionId = NoxyClient.resolveDecisionId(decision, relayMessageId)
             ?: return@on
-        // Show UI (e.g. dialog or full-screen Activity)
+        // Show UI — user decides; send outcome via sendDecisionOutcome
     }
 }
 
-// In your Activity, Fragment, or notification receiver — wire this to Approve / Reject taps:
-fun onApproveOrRejectClick(approve: Boolean) {
+// Wire UI — pass the `NoxyDecisionChoice` that reflects the user’s selection:
+fun submitDecisionOutcome(choice: NoxyDecisionChoice) {
     lifecycleScope.launch {
         val id = pendingDecisionId ?: return@launch
-        client.sendDecisionOutcome(
-            id,
-            if (approve) NoxyDecisionChoice.Approve else NoxyDecisionChoice.Reject
-        )
+        client.sendDecisionOutcome(id, choice)
     }
 }
 
@@ -114,6 +149,7 @@ lifecycleScope.launch {
     client.close()
 }
 ```
+---
 
 Delivery acknowledgements (`DecisionAck`) are sent automatically after each successfully decrypted decision when a decision id is available (`decision_id` / `decisionId` / `message_id` in the JSON, or the relay stream `message_id`).
 
@@ -126,7 +162,7 @@ Delivery acknowledgements (`DecisionAck`) are sent automatically after each succ
 | `initialize()` | Load or create device, connect to relay, authenticate |
 | `on(handler)` | Subscribe to encrypted decisions; handler receives relay `message_id`, then decrypted `Map` (`decision`) |
 | `NoxyClient.resolveDecisionId(decision, relayMessageId?)` | Pick id for outcomes: `decision_id` / `decisionId` / `message_id` in JSON, else relay `message_id` |
-| `sendDecisionOutcome(decisionId, outcome, receivedAt?)` | Send approve/reject (`DecisionOutcome` in proto) |
+| `sendDecisionOutcome(decisionId, outcome, receivedAt?)` | Send a **`DecisionOutcome`** (proto) for the user’s choice |
 | `sendDecisionAck(decisionId, receivedAt?)` | Optional extra delivery ack (normally automatic after decrypt) |
 | `setFcmToken(token)` | Register FCM token for wake-up when backgrounded |
 | `handleWakeUpNotification(data?)` | Reconnect decision stream after FCM wake |
@@ -155,7 +191,7 @@ override fun onMessageReceived(message: RemoteMessage) {
 
 ## Proto & gRPC
 
-The network layer uses gRPC with generated clients from `noxy/device/noxy.device.proto` (aligned with the iOS SDK). Code is generated by the protobuf Gradle plugin during build.
+The network layer uses gRPC with generated clients from `noxy/device/noxy.device.proto`. Code is generated by the protobuf Gradle plugin during build.
 
 ---
 
